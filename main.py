@@ -12,18 +12,17 @@ ADMINS = [111111111, 222222222]  # آیدی عددی ادمین‌ها
 ADMIN_GROUP_ID = -1001234567890  # آیدی گروه خصوصی ادمین‌ها
 CONFIG_FILE = "configs.txt"
 CONFIG_BACKUP = "configs_backup.txt"
-USERS_FILE = "users.txt"  # --- NEW ---
+USERS_FILE = "users.txt"
 CARD_NUMBER = "6219861812104395"
 CARD_NAME = "سجاد مؤیدی"
 
 # لیست سیاه کاربران
 blacklist = set()
 
-# لیست سفارشات {tracking_code: {"user_id":..., "status":..., "config":...}}
+# لیست سفارشات
 orders = {}
 # -------------------------------------------
 
-# --- NEW --- ذخیره و خواندن لیست کاربران
 def save_user(user_id):
     try:
         if not os.path.exists(USERS_FILE):
@@ -42,7 +41,6 @@ def get_all_users():
     with open(USERS_FILE, "r") as f:
         return [int(line.strip()) for line in f if line.strip()]
 
-# --- NEW --- ارسال پیام انبوه
 async def broadcast(update: Update, context: CallbackContext):
     if update.effective_user.id not in ADMINS:
         return
@@ -55,7 +53,6 @@ async def broadcast(update: Update, context: CallbackContext):
     sent = 0
     failed = 0
     
-    # اگر ریپلای روی یک پیام باشد، همان پیام ارسال می‌شود
     if update.message.reply_to_message:
         for user_id in users:
             try:
@@ -70,7 +67,7 @@ async def broadcast(update: Update, context: CallbackContext):
                 sent += 1
             except:
                 failed += 1
-            await asyncio.sleep(0.1)  # جلوگیری از بلاک شدن
+            await asyncio.sleep(0.1)
     else:
         text = " ".join(context.args)
         for user_id in users:
@@ -83,36 +80,32 @@ async def broadcast(update: Update, context: CallbackContext):
     
     await update.message.reply_text(f"✅ ارسال موفق: {sent}\n❌ ناموفق: {failed}")
 
-# خواندن کانفیگ‌ها
 def read_configs():
     if not os.path.exists(CONFIG_FILE):
         return []
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip()]
 
-# ذخیره کانفیگ‌ها
 def save_configs(configs):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(configs))
     with open(CONFIG_BACKUP, "w", encoding="utf-8") as b:
         b.write("\n".join(configs))
 
-# ساخت QR کارت بانکی
 def make_qr():
     img = qrcode.make(CARD_NUMBER)
     img.save("card_qr.png")
     return "card_qr.png"
 
-# /start
 async def start(update: Update, context: CallbackContext):
-    save_user(update.effective_user.id)  # --- NEW ---
+    save_user(update.effective_user.id)
     if update.effective_user.id in blacklist:
         await update.message.reply_text("⛔ شما از خرید در این ربات مسدود شده‌اید.")
         return
     keyboard = [[InlineKeyboardButton("💳 خرید کانفیگ", callback_data="buy")],
                 [InlineKeyboardButton("📞 پشتیبانی", callback_data="support")]]
     await update.message.reply_text("سلام 👋\nبه ربات فروش کانفیگ V2Ray خوش آمدید.", reply_markup=InlineKeyboardMarkup(keyboard))
-# پنل ادمین
+
 async def admin_panel(update: Update, context: CallbackContext):
     if update.effective_user.id not in ADMINS:
         return
@@ -125,7 +118,6 @@ async def admin_panel(update: Update, context: CallbackContext):
     ]
     await update.message.reply_text("📌 پنل ادمین", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# دکمه‌ها
 async def button_handler(update: Update, context: CallbackContext):
     query = update.callback_query
     data = query.data
@@ -172,9 +164,8 @@ async def button_handler(update: Update, context: CallbackContext):
         total_orders = len(orders)
         await query.message.reply_text(f"📊 آمار فروش:\nتعداد سفارشات: {total_orders}")
 
-# دریافت پیام‌ها
 async def message_handler(update: Update, context: CallbackContext):
-    save_user(update.effective_user.id)  # --- NEW ---
+    save_user(update.effective_user.id)
     user_id = update.effective_user.id
 
     if context.user_data.get("adding_config") and user_id in ADMINS:
@@ -195,13 +186,12 @@ async def message_handler(update: Update, context: CallbackContext):
     if context.user_data.get("waiting_payment") and update.message.photo:
         file_id = update.message.photo[-1].file_id
         tracking_code = random.randint(100000, 999999)
-orders[tracking_code] = {"user_id": user_id, "status": "pending", "config": None}
+        orders[tracking_code] = {"user_id": user_id, "status": "pending", "config": None}
         for admin_id in ADMINS:
             await context.bot.send_photo(admin_id, photo=file_id, caption=f"💰 رسید پرداخت از @{update.effective_user.username or user_id}\nتایید: /approve {tracking_code}\nرد: /reject {tracking_code}")
         await update.message.reply_text(f"✅ رسید شما ارسال شد. شماره پیگیری: {tracking_code}")
         context.user_data["waiting_payment"] = False
 
-# تایید سفارش
 async def approve(update: Update, context: CallbackContext):
     if update.effective_user.id not in ADMINS or not context.args:
         return
@@ -221,7 +211,6 @@ async def approve(update: Update, context: CallbackContext):
     await context.bot.send_message(user_id, f"🎉 خرید شما تایید شد.\n📄 کانفیگ:\n{cfg}\n🔢 شماره پیگیری: {tracking_code}")
     await context.bot.send_message(ADMIN_GROUP_ID, f"📦 کانفیگ برای {user_id} ارسال شد.\n🔢 پیگیری: {tracking_code}\n{cfg}")
 
-# رد سفارش
 async def reject(update: Update, context: CallbackContext):
     if update.effective_user.id not in ADMINS or not context.args:
         return
@@ -232,7 +221,6 @@ async def reject(update: Update, context: CallbackContext):
         del orders[tracking_code]
         await update.message.reply_text("✅ سفارش رد شد.")
 
-# پیگیری سفارش
 async def track(update: Update, context: CallbackContext):
     if not context.args:
         await update.message.reply_text("📌 استفاده: /track <شماره پیگیری>")
@@ -244,7 +232,6 @@ async def track(update: Update, context: CallbackContext):
     status = orders[tracking_code]["status"]
     await update.message.reply_text(f"📦 وضعیت سفارش: {status}")
 
-# اجرای ربات
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
@@ -252,11 +239,11 @@ def main():
     app.add_handler(CommandHandler("approve", approve))
     app.add_handler(CommandHandler("reject", reject))
     app.add_handler(CommandHandler("track", track))
-    app.add_handler(CommandHandler("broadcast", broadcast))  # --- NEW ---
+    app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, message_handler))
     print("ربات روشن شد ...")
     app.run_polling()
 
-if name == "main":
+if __name__ == "__main__":
     main()
