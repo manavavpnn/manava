@@ -7,7 +7,7 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFi
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, CallbackContext
 
 # ---------------- تنظیمات ----------------
-TOKEN = "YOUR_BOT_TOKEN"
+TOKEN = os.getenv("TOKEN")
 ADMINS = [111111111, 222222222]  # آیدی عددی ادمین‌ها
 ADMIN_GROUP_ID = -1001234567890  # آیدی گروه خصوصی ادمین‌ها
 CONFIG_FILE = "configs.txt"
