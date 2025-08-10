@@ -8,18 +8,18 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # ---------------- تنظیمات ----------------
 TOKEN = os.getenv("TOKEN")
-ADMINS = [8122737247,7844158638]  # آیدی عددی ادمین‌ها
-ADMIN_GROUP_ID = -1001234567890  # آیدی گروه خصوصی ادمین‌ها
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # آدرس کامل HTTPS وبهوک، مثلاً: https://your-app.onrender.com/webhook
+PORT = int(os.getenv("PORT", 8443))  # Render به صورت خودکار PORT را ست می‌کند
+
+ADMINS = [8122737247,7844158638]
+ADMIN_GROUP_ID = -1001234567890
 CONFIG_FILE = "configs.txt"
 CONFIG_BACKUP = "configs_backup.txt"
 USERS_FILE = "users.txt"
 CARD_NUMBER = "6219861812104395"
 CARD_NAME = "سجاد مؤیدی"
 
-# لیست سیاه کاربران
 blacklist = set()
-
-# لیست سفارشات
 orders = {}
 # -------------------------------------------
 
@@ -234,6 +234,7 @@ async def track(update: Update, context: CallbackContext):
 
 def main():
     app = Application.builder().token(TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("approve", approve))
@@ -242,8 +243,14 @@ def main():
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, message_handler))
-    print("ربات روشن شد ...")
-    app.run_polling()
+
+    print("ربات با Webhook روی Render راه‌اندازی شد...")
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TOKEN}"
+    )
 
 if __name__ == "__main__":
     main()
