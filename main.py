@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 
 # ---------------- تنظیمات ----------------
 TOKEN = os.getenv("TOKEN")
-ADMINS = [111111111, 222222222]  # آیدی عددی ادمین‌ها
+ADMINS = [8122737247,7844158638]  # آیدی عددی ادمین‌ها
 ADMIN_GROUP_ID = -1001234567890  # آیدی گروه خصوصی ادمین‌ها
 CONFIG_FILE = "configs.txt"
 CONFIG_BACKUP = "configs_backup.txt"
