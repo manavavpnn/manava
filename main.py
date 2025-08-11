@@ -1,85 +1,32 @@
 import os
 import random
 import qrcode
-import asyncio
+from collections import defaultdict
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, CallbackContext
 
-# ---------------- تنظیمات ----------------
 TOKEN = os.getenv("TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # مثل: https://your-app.onrender.com
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8080))
 
 ADMINS = [8122737247, 7844158638]
 ADMIN_GROUP_ID = -1001234567890
 CONFIG_FILE = "configs.txt"
-CONFIG_BACKUP = "configs_backup.txt"
 USERS_FILE = "users.txt"
 CARD_NUMBER = "6219861812104395"
 CARD_NAME = "سجاد مؤیدی"
 
 blacklist = set()
 orders = {}
-# -------------------------------------------
-
-def check_env():
-    if not TOKEN:
-        raise ValueError("❌ TOKEN در محیط (Environment Variables) ست نشده!")
-    if not WEBHOOK_URL:
-        raise ValueError("❌ WEBHOOK_URL در محیط ست نشده!")
 
 def save_user(user_id):
-    try:
-        if not os.path.exists(USERS_FILE):
-            open(USERS_FILE, "w").close()
-        with open(USERS_FILE, "r") as f:
-            users = set(line.strip() for line in f)
-        if str(user_id) not in users:
-            with open(USERS_FILE, "a") as f:
-                f.write(str(user_id) + "\n")
-    except:
-        pass
-
-def get_all_users():
     if not os.path.exists(USERS_FILE):
-        return []
+        open(USERS_FILE, "w").close()
     with open(USERS_FILE, "r") as f:
-        return [int(line.strip()) for line in f if line.strip()]
-
-async def broadcast(update: Update, context: CallbackContext):
-    if update.effective_user.id not in ADMINS:
-        return
-    if not context.args and not update.message.reply_to_message:
-        await update.message.reply_text("📌 استفاده:\n/broadcast متن پیام\nیا ریپلای روی یک عکس/پیام")
-        return
-    users = get_all_users()
-    sent = 0
-    failed = 0
-    if update.message.reply_to_message:
-        for user_id in users:
-            try:
-                if update.message.reply_to_message.photo:
-                    await context.bot.send_photo(
-                        chat_id=user_id,
-                        photo=update.message.reply_to_message.photo[-1].file_id,
-                        caption=update.message.reply_to_message.caption or ""
-                    )
-                elif update.message.reply_to_message.text:
-                    await context.bot.send_message(chat_id=user_id, text=update.message.reply_to_message.text)
-                sent += 1
-            except:
-                failed += 1
-            await asyncio.sleep(0.05)
-    else:
-        text = " ".join(context.args)
-        for user_id in users:
-            try:
-                await context.bot.send_message(chat_id=user_id, text=text)
-                sent += 1
-            except:
-                failed += 1
-            await asyncio.sleep(0.05)
-    await update.message.reply_text(f"✅ ارسال موفق: {sent}\n❌ ناموفق: {failed}")
+        users = set(line.strip() for line in f)
+    if str(user_id) not in users:
+        with open(USERS_FILE, "a") as f:
+            f.write(str(user_id) + "\n")
 
 def read_configs():
     if not os.path.exists(CONFIG_FILE):
@@ -90,8 +37,14 @@ def read_configs():
 def save_configs(configs):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(configs))
-    with open(CONFIG_BACKUP, "w", encoding="utf-8") as b:
-        b.write("\n".join(configs))
+
+def parse_config_line(line):
+    parts = line.split(";")
+    data = {}
+    for part in parts:
+        k, v = part.split("=", 1)
+        data[k] = v
+    return data
 
 def make_qr():
     img = qrcode.make(CARD_NUMBER)
@@ -101,23 +54,41 @@ def make_qr():
 async def start(update: Update, context: CallbackContext):
     save_user(update.effective_user.id)
     if update.effective_user.id in blacklist:
-        await update.message.reply_text("⛔ شما از خرید در این ربات مسدود شده‌اید.")
+        await update.message.reply_text("⛔ شما مسدود شده‌اید.")
         return
-    keyboard = [[InlineKeyboardButton("💳 خرید کانفیگ", callback_data="buy")],
-                [InlineKeyboardButton("📞 پشتیبانی", callback_data="support")]]
-    await update.message.reply_text("سلام 👋\nبه ربات فروش کانفیگ V2Ray خوش آمدید.", reply_markup=InlineKeyboardMarkup(keyboard))
+    keyboard = [
+        [InlineKeyboardButton("💳 خرید کانفیگ", callback_data="buy")],
+        [InlineKeyboardButton("📞 پشتیبانی", callback_data="support")]
+    ]
+    await update.message.reply_text("سلام 👋\nبه ربات فروش کانفیگ خوش آمدید.", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def admin_panel(update: Update, context: CallbackContext):
     if update.effective_user.id not in ADMINS:
         return
     keyboard = [
         [InlineKeyboardButton("➕ افزودن کانفیگ", callback_data="add_config")],
-        [InlineKeyboardButton("🗑 حذف کانفیگ", callback_data="remove_config")],
-        [InlineKeyboardButton("📄 لیست کانفیگ‌ها", callback_data="list_configs")],
-        [InlineKeyboardButton("📊 آمار فروش", callback_data="stats")],
-        [InlineKeyboardButton("🚫 لیست سیاه", callback_data="blacklist")]
+        [InlineKeyboardButton("📄 لیست کانفیگ‌ها", callback_data="list_configs")]
     ]
     await update.message.reply_text("📌 پنل ادمین", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def show_categories(context, chat_id, search_term=None):
+    configs = read_configs()
+    if not configs:
+        await context.bot.send_message(chat_id, "❌ هیچ کانفیگی موجود نیست.")
+        return
+    grouped = defaultdict(int)
+    for line in configs:
+        cfg = parse_config_line(line)
+        key = f"{cfg['حجم']} - {cfg['مدت']} - {cfg['توضیحات']}"
+        if search_term and search_term not in key:
+            continue
+        grouped[key] += 1
+    if not grouped:
+        await context.bot.send_message(chat_id, "❌ دسته‌ای با این جستجو پیدا نشد.")
+        return
+    kb = [[InlineKeyboardButton(f"{k} ({v} موجود)", callback_data=f"showlist_{k}")] for k, v in grouped.items()]
+    kb.append([InlineKeyboardButton("🔍 جستجو", callback_data="search_category")])
+    await context.bot.send_message(chat_id, "📦 دسته‌بندی کانفیگ‌ها:", reply_markup=InlineKeyboardMarkup(kb))
 
 async def button_handler(update: Update, context: CallbackContext):
     query = update.callback_query
@@ -125,44 +96,49 @@ async def button_handler(update: Update, context: CallbackContext):
     await query.answer()
 
     if data == "buy":
+        await show_categories(context, query.message.chat_id)
+
+    elif data == "search_category":
+        context.user_data["searching_category"] = True
+        await query.message.reply_text("🔍 عبارت جستجو را وارد کنید:")
+
+    elif data.startswith("showlist_"):
+        specs = data.replace("showlist_", "")
+        configs = read_configs()
+        filtered = [parse_config_line(c) for c in configs if f"{parse_config_line(c)['حجم']} - {parse_config_line(c)['مدت']} - {parse_config_line(c)['توضیحات']}" == specs]
+        kb = []
+        for idx, cfg in enumerate(filtered, start=1):
+            kb.append([InlineKeyboardButton(f"کانفیگ #{idx} ➡ {cfg['حجم']} - {cfg['مدت']} - {cfg['توضیحات']}", callback_data=f"select_{specs}")])
+        await query.message.reply_text(f"📋 لیست کانفیگ‌های دسته: {specs}", reply_markup=InlineKeyboardMarkup(kb))
+
+    elif data.startswith("select_"):
+        specs = data.replace("select_", "")
+        context.user_data["selected_specs"] = specs
         qr_path = make_qr()
         await query.message.reply_text(f"💳 شماره کارت:\n{CARD_NUMBER}\nبه نام: {CARD_NAME}\n\nبعد از پرداخت، اسکرین‌شات را ارسال کنید.")
-        await query.message.reply_photo(photo=InputFile(qr_path), caption="📌 اسکن کنید و پرداخت انجام دهید.")
+        await query.message.reply_photo(photo=InputFile(qr_path))
         context.user_data["waiting_payment"] = True
 
-    elif data == "support":
-        await query.message.reply_text("📨 پیام خود را ارسال کنید، ادمین پاسخ خواهد داد.")
-        context.user_data["support_mode"] = True
-
-    elif data == "add_config" and query.from_user.id in ADMINS:
-        await query.message.reply_text("📄 کانفیگ را بفرستید:")
-        context.user_data["adding_config"] = True
-
 async def message_handler(update: Update, context: CallbackContext):
-    save_user(update.effective_user.id)
     user_id = update.effective_user.id
+    save_user(user_id)
 
-    if context.user_data.get("adding_config") and user_id in ADMINS:
-        configs = read_configs()
-        configs.append(update.message.text.strip())
-        save_configs(configs)
-        await update.message.reply_text("✅ کانفیگ اضافه شد.")
-        context.user_data["adding_config"] = False
+    # جستجو در دسته‌ها
+    if context.user_data.get("searching_category"):
+        search_term = update.message.text.strip()
+        context.user_data["searching_category"] = False
+        await show_categories(context, update.message.chat_id, search_term)
         return
 
-    if context.user_data.get("support_mode"):
-        for admin_id in ADMINS:
-            await context.bot.send_message(admin_id, f"📩 پیام پشتیبانی از @{update.effective_user.username or user_id}:\n{update.message.text}")
-        await update.message.reply_text("✅ پیام شما ارسال شد.")
-        context.user_data["support_mode"] = False
-        return
-
+    # پرداخت
     if context.user_data.get("waiting_payment") and update.message.photo:
+        specs = context.user_data.get("selected_specs")
         file_id = update.message.photo[-1].file_id
         tracking_code = random.randint(100000, 999999)
-        orders[tracking_code] = {"user_id": user_id, "status": "pending", "config": None}
+        orders[tracking_code] = {"user_id": user_id, "status": "pending", "specs": specs}
         for admin_id in ADMINS:
-            await context.bot.send_photo(admin_id, photo=file_id, caption=f"💰 رسید پرداخت از @{update.effective_user.username or user_id}\nتایید: /approve {tracking_code}\nرد: /reject {tracking_code}")
+            await context.bot.send_photo(admin_id, photo=file_id,
+                                         caption=f"💰 رسید پرداخت\nکاربر: @{update.effective_user.username or user_id}\nمشخصات: {specs}\nتایید: /approve {tracking_code}\nرد: /reject {tracking_code}")
         await update.message.reply_text(f"✅ رسید شما ارسال شد. شماره پیگیری: {tracking_code}")
         context.user_data["waiting_payment"] = False
 
@@ -173,17 +149,23 @@ async def approve(update: Update, context: CallbackContext):
     if tracking_code not in orders:
         await update.message.reply_text("❌ سفارش پیدا نشد.")
         return
+    order = orders[tracking_code]
+    specs = order["specs"]
     configs = read_configs()
-    if not configs:
-        await update.message.reply_text("❌ هیچ کانفیگی موجود نیست.")
+    selected_cfg = None
+    for i, line in enumerate(configs):
+        data = parse_config_line(line)
+        if f"{data['حجم']} - {data['مدت']} - {data['توضیحات']}" == specs:
+            selected_cfg = data["config"]
+            configs.pop(i)
+            break
+    if not selected_cfg:
+        await update.message.reply_text("❌ کانفیگ با این مشخصات موجود نیست.")
         return
-    cfg = configs.pop(0)
     save_configs(configs)
     orders[tracking_code]["status"] = "approved"
-    orders[tracking_code]["config"] = cfg
-    user_id = orders[tracking_code]["user_id"]
-    await context.bot.send_message(user_id, f"🎉 خرید شما تایید شد.\n📄 کانفیگ:\n{cfg}\n🔢 شماره پیگیری: {tracking_code}")
-    await context.bot.send_message(ADMIN_GROUP_ID, f"📦 کانفیگ برای {user_id} ارسال شد.\n🔢 پیگیری: {tracking_code}\n{cfg}")
+    await context.bot.send_message(order["user_id"], f"🎉 خرید شما تایید شد.\n📄 کانفیگ:\n{selected_cfg}\n🔢 پیگیری: {tracking_code}")
+    await context.bot.send_message(ADMIN_GROUP_ID, f"📦 کانفیگ برای {order['user_id']} ارسال شد.\n{selected_cfg}")
 
 async def reject(update: Update, context: CallbackContext):
     if update.effective_user.id not in ADMINS or not context.args:
@@ -191,30 +173,21 @@ async def reject(update: Update, context: CallbackContext):
     tracking_code = int(context.args[0])
     if tracking_code in orders:
         user_id = orders[tracking_code]["user_id"]
-        await context.bot.send_message(user_id, "❌ سفارش شما رد شد. لطفاً مجدداً اقدام کنید.")
+        await context.bot.send_message(user_id, "❌ سفارش شما رد شد.")
         del orders[tracking_code]
         await update.message.reply_text("✅ سفارش رد شد.")
 
 def main():
-    check_env()
     app = Application.builder().token(TOKEN).build()
-
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("approve", approve))
     app.add_handler(CommandHandler("reject", reject))
-    app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, message_handler))
-
-    print(f"✅ ربات با Webhook روی Render راه‌اندازی شد...")
-    print(f"📡 آدرس وبهوک: {WEBHOOK_URL}/webhook/{TOKEN}")
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=f"webhook/{TOKEN}",
-        webhook_url=f"{WEBHOOK_URL}/webhook/{TOKEN}"
-    )
+    app.run_webhook(listen="0.0.0.0", port=PORT,
+                    url_path=f"webhook/{TOKEN}",
+                    webhook_url=f"{WEBHOOK_URL}/webhook/{TOKEN}")
 
 if __name__ == "__main__":
     main()
