@@ -272,4 +272,6 @@ def main():
     print(f"📡 مسیر پینگ UptimeRobot: {WEBHOOK_URL}/ping")
 
     web.run_app(aio_app, host="0.0.0.0", port=PORT)
+    if __name__ == "__main__":
+    asyncio.run(main())
 
