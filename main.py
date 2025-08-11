@@ -188,7 +188,6 @@ async def approve(update: Update, context: CallbackContext):
         await update.message.reply_text("❌ موجودی این دسته تمام شده.")
         return
     cfg = grouped[cat].pop(0)
-    # حذف از کل لیست
     configs.remove(cfg)
     save_configs(configs)
     orders[tracking_code]["status"] = "approved"
@@ -210,21 +209,32 @@ async def reject(update: Update, context: CallbackContext):
 async def handle_ping(request):
     return web.Response(text="OK")
 
+# ------------------ Webhook handler ------------------
+async def telegram_webhook(request):
+    data = await request.json()
+    update = Update.de_json(data, bot.application.bot)
+    await bot.application.process_update(update)
+    return web.Response(text="OK")
+
 # ------------------ main ------------------
 def main():
     check_env()
-    app = Application.builder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CommandHandler("approve", approve))
-    app.add_handler(CommandHandler("reject", reject))
-    app.add_handler(CallbackQueryHandler(button_handler))
-    app.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, message_handler))
+    global bot
+    bot = Application.builder().token(TOKEN).build()
+    bot.add_handler(CommandHandler("start", start))
+    bot.add_handler(CommandHandler("admin", admin_panel))
+    bot.add_handler(CommandHandler("approve", approve))
+    bot.add_handler(CommandHandler("reject", reject))
+    bot.add_handler(CallbackQueryHandler(button_handler))
+    bot.add_handler(MessageHandler(filters.TEXT | filters.PHOTO, message_handler))
 
-    # راه‌اندازی وب‌سرور aiohttp
+    # aiohttp app
     aio_app = web.Application()
-    aio_app.router.add_post(f"/webhook/{TOKEN}", app.update_queue.webhook_view())
+    aio_app.router.add_post(f"/webhook/{TOKEN}", telegram_webhook)
     aio_app.router.add_get("/ping", handle_ping)
+
+    # ست کردن webhook
+    asyncio.get_event_loop().run_until_complete(bot.bot.set_webhook(f"{WEBHOOK_URL}/webhook/{TOKEN}"))
 
     print(f"✅ ربات آماده است. Webhook: {WEBHOOK_URL}/webhook/{TOKEN}")
     print(f"📡 مسیر پینگ UptimeRobot: {WEBHOOK_URL}/ping")
