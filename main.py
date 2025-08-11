@@ -229,9 +229,15 @@ async def handle_ping(request):
 
 # ------------------ Webhook handler ------------------
 async def telegram_webhook(request):
-    data = await request.json()
-    update = Update.de_json(data, bot.bot)
-    await bot.process_update(update)
+    try:
+        data = await request.json()
+        update = Update.de_json(data, bot.bot)
+        await bot.process_update(update)
+    except Exception as e:
+        import traceback
+        print("❌ Webhook error:", e)
+        print(traceback.format_exc())
+        return web.Response(status=500, text="Internal Server Error")
     return web.Response(text="OK")
 
 # ------------------ main ------------------
