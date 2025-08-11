@@ -235,7 +235,7 @@ async def telegram_webhook(request):
     return web.Response(text="OK")
 
 # ------------------ main ------------------
-def main():
+async def main():
     check_env()
     load_orders()
     global bot
@@ -251,27 +251,27 @@ def main():
     aio_app.router.add_post(f"/webhook/{TOKEN}", telegram_webhook)
     aio_app.router.add_get("/ping", handle_ping)
 
-    async def setup_webhook():
-        # قبل از تنظیم
-        info = await bot.bot.get_webhook_info()
-        print("📡 Webhook Info BEFORE:", info)
+    # قبل از تنظیم
+    info = await bot.bot.get_webhook_info()
+    print("📡 Webhook Info BEFORE:", info)
 
-        expected_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
-        if info.url != expected_url:
-            print("⚠️ Webhook اشتباه یا ثبت نشده، در حال تنظیم...")
-            await bot.bot.set_webhook(expected_url)
-            print("✅ Webhook تنظیم شد!")
+    expected_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
+    if info.url != expected_url:
+        print("⚠️ Webhook اشتباه یا ثبت نشده، در حال تنظیم...")
+        await bot.bot.set_webhook(expected_url)
+        print("✅ Webhook تنظیم شد!")
 
-        # بعد از تنظیم
-        info = await bot.bot.get_webhook_info()
-        print("📡 Webhook Info AFTER:", info)
-
-    asyncio.run(setup_webhook())
+    # بعد از تنظیم
+    info = await bot.bot.get_webhook_info()
+    print("📡 Webhook Info AFTER:", info)
 
     print(f"✅ ربات آماده است. Webhook: {WEBHOOK_URL}/webhook/{TOKEN}")
     print(f"📡 مسیر پینگ UptimeRobot: {WEBHOOK_URL}/ping")
 
-    web.run_app(aio_app, host="0.0.0.0", port=PORT)
-    if __name__ == "__main__":
-    asyncio.run(main())
+    runner = web.AppRunner(aio_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
 
+if __name__ == "__main__":
+    asyncio.run(main())
