@@ -108,13 +108,13 @@ def main():
     ping_app.router.add_get("/ping", handle_ping)
 
     # راه‌اندازی وبهوک
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{TOKEN},
-        web_app=ping_app
-    )
+   application.run_webhook(
+    listen="0.0.0.0",
+    port=PORT,
+    url_path=TOKEN,
+    webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
+    web_app=ping_app
+)
 
 if __name__ == "__main__":
     main()
