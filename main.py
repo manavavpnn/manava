@@ -1,10 +1,9 @@
 import os
 import json
 import qrcode
-import asyncio
 from aiohttp import web
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # ===== تنظیمات =====
 TOKEN = os.getenv("TOKEN")
@@ -22,7 +21,6 @@ CARD_NAME = os.getenv("CARD_NAME", "سجاد مؤیدی")
 
 blacklist = set()
 orders = {}
-application = None  # اپلیکیشن سراسری
 
 # ===== توابع کمکی =====
 def check_env():
@@ -86,60 +84,37 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("💳 خرید کانفیگ", callback_data="buy")],
         [InlineKeyboardButton("📞 پشتیبانی", callback_data="support")]
     ]
-    await update.message.reply_text("سلام 👋\nبه ربات فروش کانفیگ خوش آمدید.", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text(
+        "سلام 👋\nبه ربات فروش کانفیگ خوش آمدید.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
-# ===== UptimeRobot Ping =====
+# ===== مسیر پینگ =====
 async def handle_ping(request):
     return web.Response(text="OK")
 
-# ===== Webhook handler =====
-async def telegram_webhook(request):
-    try:
-        data = await request.json()
-        update = Update.de_json(data, application.bot)
-        await application.process_update(update)
-    except Exception as e:
-        import traceback
-        print("❌ Webhook error:", e)
-        print(traceback.format_exc())
-        return web.Response(status=500, text="Internal Server Error")
-    return web.Response(text="OK")
-
 # ===== main =====
-async def main():
-    global application
+def main():
     check_env()
     load_orders()
 
     application = Application.builder().token(TOKEN).build()
 
-    # هندلرها
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))  # نمونه تستی
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
 
-    aio_app = web.Application()
-    aio_app.router.add_post(f"/webhook/{TOKEN}", telegram_webhook)
-    aio_app.router.add_get("/ping", handle_ping)
+    # وب‌سرور برای /ping
+    ping_app = web.Application()
+    ping_app.router.add_get("/ping", handle_ping)
 
-    info = await application.bot.get_webhook_info()
-    print("📡 Webhook Info BEFORE:", info)
-
-    expected_url = f"{WEBHOOK_URL}/webhook/{TOKEN}"
-    if info.url != expected_url:
-        print("⚠️ Webhook اشتباه یا ثبت نشده، در حال تنظیم...")
-        await application.bot.set_webhook(expected_url)
-        print("✅ Webhook تنظیم شد!")
-
-    info = await application.bot.get_webhook_info()
-    print("📡 Webhook Info AFTER:", info)
-
-    print(f"✅ ربات آماده است. Webhook: {WEBHOOK_URL}/webhook/{TOKEN}")
-    print(f"📡 مسیر پینگ UptimeRobot: {WEBHOOK_URL}/ping")
-
-    runner = web.AppRunner(aio_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
+    # راه‌اندازی وبهوک
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TOKEN,
+        webhook_url=f"{WEBHOOK_URL}/{TOKEN},
+        web_app=ping_app
+    )
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
