@@ -123,7 +123,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         qr_path = make_qr()
         await query.message.reply_photo(photo=open(qr_path, "rb"), caption=f"شماره کارت: {CARD_NUMBER}\nنام: {CARD_NAME}")
     elif query.data == "support":
-        await query.edit_message_text("پشتیبانی: @support_username")
+        await query.edit_message_text("پشتیبانی: @manava_vpn")
     elif query.data == "admin_panel":
         await query.edit_message_text("پنل ادمین: در حال توسعه...")  # اینجا می‌توانید منطق پنل ادمین را اضافه کنید
 
