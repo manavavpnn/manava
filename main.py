@@ -13,7 +13,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8080))
 
 ADMINS = [8122737247, 7844158638]
-ADMIN_GROUP_ID = 2944289128
+ADMIN_GROUP_ID = -1001234567890
 CONFIG_FILE = "configs.json"
 USERS_FILE = "users.txt"
 ORDERS_FILE = "orders.json"
@@ -98,14 +98,18 @@ def save_blacklist():
 
 # ===== هندلرها =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    save_user(update.effective_user.id)
-    if update.effective_user.id in blacklist:
+    user_id = update.effective_user.id
+    save_user(user_id)
+    if user_id in blacklist:
         await update.message.reply_text("⛔ شما مسدود شده‌اید.")
         return
     keyboard = [
         [InlineKeyboardButton("💳 خرید کانفیگ", callback_data="buy")],
         [InlineKeyboardButton("📞 پشتیبانی", callback_data="support")]
     ]
+    # اضافه کردن دکمه پنل ادمین فقط برای ادمین‌ها
+    if user_id in ADMINS:
+        keyboard.append([InlineKeyboardButton("🔧 پنل ادمین", callback_data="admin_panel")])
     await update.message.reply_text(
         "سلام 👋\nبه ربات فروش کانفیگ خوش آمدید.",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -116,11 +120,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     if query.data == "buy":
         await query.edit_message_text("لیست کانفیگ‌ها...")
-        # می‌توانید لیست کانفیگ‌ها را اینجا اضافه کنید و QR برای پرداخت ارسال کنید
         qr_path = make_qr()
         await query.message.reply_photo(photo=open(qr_path, "rb"), caption=f"شماره کارت: {CARD_NUMBER}\nنام: {CARD_NAME}")
     elif query.data == "support":
         await query.edit_message_text("پشتیبانی: @support_username")
+    elif query.data == "admin_panel":
+        await query.edit_message_text("پنل ادمین: در حال توسعه...")  # اینجا می‌توانید منطق پنل ادمین را اضافه کنید
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"خطا: {context.error}")
@@ -157,7 +162,7 @@ async def main():
     # اپلیکیشن aiohttp
     app = web.Application()
     app.router.add_post(f"/{TOKEN}", webhook)
-    app.router.add_get("/ping", handle_ping)  # اگر Render به / پینگ می‌زند، به app.router.add_get("/", handle_ping) تغییر دهید
+    app.router.add_get("/ping", handle_ping)
 
     # راه‌اندازی سرور
     runner = web.AppRunner(app)
