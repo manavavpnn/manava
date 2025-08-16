@@ -1,6 +1,7 @@
 import os
 import json
 import qrcode
+import asyncio
 from aiohttp import web
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -94,7 +95,7 @@ async def handle_ping(request):
     return web.Response(text="OK")
 
 # ===== main =====
-def main():
+async def main():
     check_env()
     load_orders()
 
@@ -103,18 +104,37 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
 
-    # وب‌سرور برای /ping
-    ping_app = web.Application()
-    ping_app.router.add_get("/ping", handle_ping)
+    # هندلر وبهوک
+    async def webhook(request):
+        data = await request.json()
+        update = Update.de_json(data, application.bot)
+        await application.process_update(update)
+        return web.Response(status=200)
 
-    # راه‌اندازی وبهوک
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path=TOKEN,
-        webhook_url=f"{WEBHOOK_URL}/{TOKEN}",
-        web_app=ping_app
-    )
+    # اپلیکیشن aiohttp
+    app = web.Application()
+    app.router.add_post(f"/{TOKEN}", webhook)
+    app.router.add_get("/ping", handle_ping)  # اگر Render به / پینگ می‌زند، به app.router.add_get("/", handle_ping) تغییر دهید
+
+    # راه‌اندازی سرور
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+
+    # تنظیم وبهوک تلگرام
+    await application.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}")
+
+    # راه‌اندازی اپلیکیشن
+    await application.initialize()
+    await application.start()
+
+    # اجرای بی‌نهایت تا توقف
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await application.stop()
+        await runner.cleanup()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
