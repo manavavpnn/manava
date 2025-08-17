@@ -14,7 +14,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8080))
 ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID", "-1001234567890")  # مقدار پیش‌فرض
 
-ADMINS = [8122737247, 7844158638 , 7575987537]
+ADMINS = [8122737247, 7844158638]
 CONFIG_FILE = "configs.json"
 USERS_FILE = "users.txt"
 ORDERS_FILE = "orders.json"
@@ -71,10 +71,14 @@ def save_configs():
         json.dump(configs, f, ensure_ascii=False, indent=2)
 
 def make_qr():
-    img = qrcode.make(CARD_NUMBER)
-    qr_path = "card_qr.png"
-    img.save(qr_path)
-    return qr_path
+    try:
+        img = qrcode.make(CARD_NUMBER)
+        qr_path = "card_qr.png"
+        img.save(qr_path)
+        return qr_path
+    except Exception as e:
+        logger.error(f"خطا در تولید QR کد: {e}")
+        return None
 
 def group_configs(configs):
     grouped = {}
@@ -171,6 +175,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         config_id = int(query.data.split("_")[2])
         context.user_data['selected_config'] = config_id
         qr_path = make_qr()
+        config = next((cfg for cfg in configs if cfg['id'] == config_id), None)
+        if not config:
+            await query.edit_message_text("کانفیگ یافت نشد.")
+            return
         order_id = str(len(orders) + 1)
         orders[order_id] = {
             'user_id': query.from_user.id,
@@ -178,22 +186,29 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'status': 'pending'
         }
         save_orders()
-        config = next((cfg for cfg in configs if cfg['id'] == config_id), None)
-        if config:
-            await query.message.reply_photo(
-                photo=open(qr_path, "rb"),
-                caption=f"لطفاً مبلغ {config['قیمت']} تومان به شماره کارت زیر واریز کنید:\n{CARD_NUMBER}\nنام: {CARD_NAME}\nID سفارش: {order_id}"
-            )
-            # ارسال نوتیفیکیشن به گروه ادمین
+        if qr_path:
             try:
-                await context.bot.send_message(
-                    chat_id=ADMIN_GROUP_ID,
-                    text=f"سفارش جدید:\nکاربر: {query.from_user.id}\nID سفارش: {order_id}\nکانفیگ: {config['حجم']} - {config['مدت']} - {config['قیمت']}"
+                await query.message.reply_photo(
+                    photo=open(qr_path, "rb"),
+                    caption=f"لطفاً مبلغ {config['قیمت']} تومان به شماره کارت زیر واریز کنید:\n{CARD_NUMBER}\nنام: {CARD_NAME}\nID سفارش: {order_id}"
                 )
+                # ارسال نوتیفیکیشن به گروه ادمین
+                try:
+                    await context.bot.send_message(
+                        chat_id=ADMIN_GROUP_ID,
+                        text=f"سفارش جدید:\nکاربر: {query.from_user.id}\nID سفارش: {order_id}\nکانفیگ: {config['حجم']} - {config['مدت']} - {config['قیمت']}"
+                    )
+                except Exception as e:
+                    logger.error(f"خطا در ارسال نوتیفیکیشن به گروه ادمین: {e}")
+                finally:
+                    os.remove(qr_path)  # حذف فایل QR
             except Exception as e:
-                logger.error(f"خطا در ارسال نوتیفیکیشن به گروه ادمین: {e}")
-            finally:
-                os.remove(qr_path)  # حذف فایل QR
+                logger.error(f"خطا در ارسال تصویر QR: {e}")
+                await query.edit_message_text("خطا در تولید QR کد. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.")
+                return
+        else:
+            await query.edit_message_text("خطا در تولید QR کد. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.")
+            return
         await query.edit_message_text("سفارش شما ثبت شد. پس از پرداخت، منتظر تایید باشید.")
     elif query.data == "cancel":
         await query.edit_message_text("عملیات لغو شد.")
@@ -227,7 +242,7 @@ async def add_config_duration(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def add_config_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price = update.message.text.strip()
     if not price.isdigit():
-        await update.message.reply_text("قیمت باید عدد باشد. لطفاً دوباره وارد کنید:")
+        await update.message.reply_text("قیمت باید عدد باشد. لطفاً دوباره تلاش کنید:")
         return ADD_CONFIG_PRICE
     context.user_data['price'] = price
     await update.message.reply_text("لینک کانفیگ (باید با http یا https شروع شود):")
