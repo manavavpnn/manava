@@ -14,7 +14,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8080))
 ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID", "-1001234567890")  # مقدار پیش‌فرض
 
-ADMINS = [8122737247, 7844158638]
+ADMINS = [8122737247, 7844158638 , 7575987537]
 CONFIG_FILE = "configs.json"
 USERS_FILE = "users.txt"
 ORDERS_FILE = "orders.json"
