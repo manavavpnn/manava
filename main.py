@@ -14,7 +14,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8080))
 ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID", "-1001234567890")  # مقدار پیش‌فرض
 
-ADMINS = [8122737247, 7844158638 , 7575987537]
+ADMINS = [8122737247, 7844158638]
 CONFIG_FILE = "configs.json"
 USERS_FILE = "users.txt"
 ORDERS_FILE = "orders.json"
@@ -162,8 +162,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ["/list_orders", "/approve_order"],
             ["/stats", "/cancel"]
         ]
-        await query.edit_message_text(
-            "پنل ادمین: دستورات زیر را انتخاب کنید.",
+        await query.edit_message_text("پنل ادمین باز شد.")
+        await query.message.reply_text(
+            "دستورات پنل ادمین:",
             reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
         )
     elif query.data.startswith("buy_config_"):
