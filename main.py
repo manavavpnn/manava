@@ -3,6 +3,7 @@ import json
 import qrcode
 import asyncio
 import logging
+import re
 from aiohttp import web
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ConversationHandler, PicklePersistence
@@ -11,9 +12,9 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 TOKEN = os.getenv("TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 8080))
+ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID", "-1001234567890")  # مقدار پیش‌فرض
 
-ADMINS = [8122737247, 7844158638]
-ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID")
+ADMINS = [8122737247, 7844158638 , 7575987537]
 CONFIG_FILE = "configs.json"
 USERS_FILE = "users.txt"
 ORDERS_FILE = "orders.json"
@@ -25,6 +26,7 @@ CARD_NAME = os.getenv("CARD_NAME", "سجاد مؤیدی")
 blacklist = set()
 orders = {}
 configs = []
+users_cache = set()
 
 # ===== logging =====
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -43,16 +45,18 @@ def check_env():
         raise ValueError("❌ WEBHOOK_URL در محیط ست نشده!")
     if not WEBHOOK_URL.startswith("https://"):
         raise ValueError("WEBHOOK_URL باید HTTPS باشه!")
+    if not ADMIN_GROUP_ID:
+        raise ValueError("❌ ADMIN_GROUP_ID در محیط ست نشده!")
 
 def save_user(user_id):
+    global users_cache
     if not os.path.exists(USERS_FILE):
         open(USERS_FILE, "w", encoding="utf-8").close()
-    with open(USERS_FILE, "r", encoding="utf-8") as f:
-        users = set(line.strip() for line in f if line.strip())
-    if str(user_id) not in users:
+    if str(user_id) not in users_cache:
         with open(USERS_FILE, "a", encoding="utf-8") as f:
             f.write(str(user_id) + "\n")
-    return len(users) + 1  # تعداد کل کاربران
+        users_cache.add(str(user_id))
+    return len(users_cache)
 
 def load_configs():
     global configs
@@ -68,8 +72,9 @@ def save_configs():
 
 def make_qr():
     img = qrcode.make(CARD_NUMBER)
-    img.save("card_qr.png")
-    return "card_qr.png"
+    qr_path = "card_qr.png"
+    img.save(qr_path)
+    return qr_path
 
 def group_configs(configs):
     grouped = {}
@@ -105,12 +110,21 @@ def save_blacklist():
         for user_id in blacklist:
             f.write(f"{user_id}\n")
 
+def load_users_cache():
+    global users_cache
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE, "r", encoding="utf-8") as f:
+            users_cache = set(line.strip() for line in f if line.strip())
+
 def get_stats():
-    total_users = len(set(line.strip() for line in open(USERS_FILE, "r", encoding="utf-8") if line.strip()))
     total_configs = len(configs)
     total_orders = len(orders)
     pending_orders = sum(1 for order in orders.values() if order['status'] == 'pending')
-    return f"📊 آمار:\nکاربران: {total_users}\nکانفیگ‌ها: {total_configs}\nسفارش‌ها: {total_orders}\nسفارش‌های در انتظار: {pending_orders}"
+    return f"📊 آمار:\nکاربران: {len(users_cache)}\nکانفیگ‌ها: {total_configs}\nسفارش‌ها: {total_orders}\nسفارش‌های در انتظار: {pending_orders}"
+
+def is_valid_url(url):
+    regex = r'^(https?|ftp)://[^\s/$.?#].[^\s]*$'
+    return re.match(regex, url) is not None
 
 # ===== هندلرها =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -150,7 +164,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text(
             "پنل ادمین: دستورات زیر را انتخاب کنید.",
-            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+            reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
         )
     elif query.data.startswith("buy_config_"):
         config_id = int(query.data.split("_")[2])
@@ -170,11 +184,18 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 caption=f"لطفاً مبلغ {config['قیمت']} تومان به شماره کارت زیر واریز کنید:\n{CARD_NUMBER}\nنام: {CARD_NAME}\nID سفارش: {order_id}"
             )
             # ارسال نوتیفیکیشن به گروه ادمین
-            await context.bot.send_message(
-                chat_id=ADMIN_GROUP_ID,
-                text=f"سفارش جدید:\nکاربر: {query.from_user.id}\nID سفارش: {order_id}\nکانفیگ: {config['حجم']} - {config['مدت']} - {config['قیمت']}"
-            )
+            try:
+                await context.bot.send_message(
+                    chat_id=ADMIN_GROUP_ID,
+                    text=f"سفارش جدید:\nکاربر: {query.from_user.id}\nID سفارش: {order_id}\nکانفیگ: {config['حجم']} - {config['مدت']} - {config['قیمت']}"
+                )
+            except Exception as e:
+                logger.error(f"خطا در ارسال نوتیفیکیشن به گروه ادمین: {e}")
+            finally:
+                os.remove(qr_path)  # حذف فایل QR
         await query.edit_message_text("سفارش شما ثبت شد. پس از پرداخت، منتظر تایید باشید.")
+    elif query.data == "cancel":
+        await query.edit_message_text("عملیات لغو شد.")
 
 async def add_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -185,22 +206,37 @@ async def add_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ADD_CONFIG_VOLUME
 
 async def add_config_volume(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['volume'] = update.message.text
+    volume = update.message.text.strip()
+    if not volume:
+        await update.message.reply_text("حجم نامعتبر است. لطفاً دوباره وارد کنید (مثل 10GB):")
+        return ADD_CONFIG_VOLUME
+    context.user_data['volume'] = volume
     await update.message.reply_text("مدت زمان (مثل 30 روز):")
     return ADD_CONFIG_DURATION
 
 async def add_config_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['duration'] = update.message.text
-    await update.message.reply_text("قیمت (به تومان):")
+    duration = update.message.text.strip()
+    if not duration:
+        await update.message.reply_text("مدت زمان نامعتبر است. لطفاً دوباره وارد کنید (مثل 30 روز):")
+        return ADD_CONFIG_DURATION
+    context.user_data['duration'] = duration
+    await update.message.reply_text("قیمت (به تومان، فقط عدد):")
     return ADD_CONFIG_PRICE
 
 async def add_config_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['price'] = update.message.text
-    await update.message.reply_text("لینک کانفیگ:")
+    price = update.message.text.strip()
+    if not price.isdigit():
+        await update.message.reply_text("قیمت باید عدد باشد. لطفاً دوباره وارد کنید:")
+        return ADD_CONFIG_PRICE
+    context.user_data['price'] = price
+    await update.message.reply_text("لینک کانفیگ (باید با http یا https شروع شود):")
     return ADD_CONFIG_LINK
 
 async def add_config_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    link = update.message.text
+    link = update.message.text.strip()
+    if not is_valid_url(link):
+        await update.message.reply_text("لینک نامعتبر است. لطفاً لینک معتبر (با http یا https) وارد کنید:")
+        return ADD_CONFIG_LINK
     new_config = {
         'حجم': context.user_data['volume'],
         'مدت': context.user_data['duration'],
@@ -211,12 +247,16 @@ async def add_config_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     configs.append(new_config)
     save_configs()
     await update.message.reply_text(f"کانفیگ جدید اضافه شد: {new_config}")
+    context.user_data.clear()  # پاک‌سازی state
     return ConversationHandler.END
 
 async def remove_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in ADMINS:
         await update.message.reply_text("❌ دسترسی ندارید.")
+        return ConversationHandler.END
+    if not configs:
+        await update.message.reply_text("هیچ کانفیگی موجود نیست.")
         return ConversationHandler.END
     config_list = "\n".join([f"ID: {cfg['id']} - {cfg['حجم']} - {cfg['مدت']} - {cfg['قیمت']}" for cfg in configs])
     await update.message.reply_text(f"لیست کانفیگ‌ها:\n{config_list}\nID کانفیگ برای حذف:")
@@ -225,12 +265,16 @@ async def remove_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def remove_config_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         config_id = int(update.message.text)
+        if any(order['config_id'] == config_id and order['status'] == 'pending' for order in orders.values()):
+            await update.message.reply_text("نمی‌توان کانفیگ را حذف کرد چون در سفارش‌های در انتظار استفاده شده است.")
+            return ConversationHandler.END
         global configs
         configs = [cfg for cfg in configs if cfg['id'] != config_id]
         save_configs()
         await update.message.reply_text(f"کانفیگ با ID {config_id} حذف شد.")
     except ValueError:
-        await update.message.reply_text("ID نامعتبر.")
+        await update.message.reply_text("ID نامعتبر. لطفاً یک عدد وارد کنید.")
+        return REMOVE_CONFIG_ID
     return ConversationHandler.END
 
 async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -253,19 +297,25 @@ async def approve_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Order ID را وارد کنید: /approve_order <order_id>")
         return
     order_id = context.args[0]
-    if order_id in orders:
-        orders[order_id]['status'] = 'approved'
-        order = orders[order_id]
-        config = next((cfg for cfg in configs if cfg['id'] == order['config_id']), None)
-        if config:
+    if order_id not in orders:
+        await update.message.reply_text("سفارش یافت نشد.")
+        return
+    if orders[order_id]['status'] != 'pending':
+        await update.message.reply_text("این سفارش در حالت در انتظار نیست.")
+        return
+    orders[order_id]['status'] = 'approved'
+    order = orders[order_id]
+    config = next((cfg for cfg in configs if cfg['id'] == order['config_id']), None)
+    if config:
+        try:
             await context.bot.send_message(
                 chat_id=order['user_id'],
                 text=f"سفارش شما تایید شد. لینک: {config['لینک']}"
             )
-        await update.message.reply_text(f"سفارش {order_id} تایید شد.")
-        save_orders()
-    else:
-        await update.message.reply_text("سفارش یافت نشد.")
+        except Exception as e:
+            logger.error(f"خطا در ارسال پیام به کاربر {order['user_id']}: {e}")
+    await update.message.reply_text(f"سفارش {order_id} تایید شد.")
+    save_orders()
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -275,6 +325,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(get_stats())
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()  # پاک‌سازی state
     await update.message.reply_text("عملیات لغو شد.")
     return ConversationHandler.END
 
@@ -288,6 +339,7 @@ async def handle_ping(request):
 # ===== main =====
 async def main():
     check_env()
+    load_users_cache()
     load_orders()
     load_blacklist()
     load_configs()
@@ -301,10 +353,10 @@ async def main():
     add_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("add_config", add_config, filters=filters.ChatType.PRIVATE)],
         states={
-            ADD_CONFIG_VOLUME: [MessageHandler(filters.TEXT, add_config_volume)],
-            ADD_CONFIG_DURATION: [MessageHandler(filters.TEXT, add_config_duration)],
-            ADD_CONFIG_PRICE: [MessageHandler(filters.TEXT, add_config_price)],
-            ADD_CONFIG_LINK: [MessageHandler(filters.TEXT, add_config_link)],
+            ADD_CONFIG_VOLUME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_volume)],
+            ADD_CONFIG_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_duration)],
+            ADD_CONFIG_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_price)],
+            ADD_CONFIG_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_link)],
         },
         fallbacks=[CommandHandler("cancel", cancel, filters=filters.ChatType.PRIVATE)]
     )
@@ -313,7 +365,7 @@ async def main():
     remove_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("remove_config", remove_config, filters=filters.ChatType.PRIVATE)],
         states={
-            REMOVE_CONFIG_ID: [MessageHandler(filters.TEXT, remove_config_id)],
+            REMOVE_CONFIG_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, remove_config_id)],
         },
         fallbacks=[CommandHandler("cancel", cancel, filters=filters.ChatType.PRIVATE)]
     )
