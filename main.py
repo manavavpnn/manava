@@ -347,10 +347,7 @@ async def main():
 
     application = Application.builder().token(TOKEN).persistence(PicklePersistence("bot_data.pkl")).build()
 
-    application.add_handler(CommandHandler("start", start, filters=filters.ChatType.PRIVATE))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
-    application.add_handler(CallbackQueryHandler(button_handler))
-
+    # ابتدا ConversationHandlerها را اضافه کنید تا اولویت داشته باشند
     add_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("add_config", add_config, filters=filters.ChatType.PRIVATE)],
         states={
@@ -372,9 +369,17 @@ async def main():
     )
     application.add_handler(remove_conv_handler)
 
+    # سپس CommandHandlerهای دیگر
+    application.add_handler(CommandHandler("start", start, filters=filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("list_orders", list_orders, filters=filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("approve_order", approve_order, filters=filters.ChatType.PRIVATE))
     application.add_handler(CommandHandler("stats", stats, filters=filters.ChatType.PRIVATE))
+
+    # CallbackQueryHandler
+    application.add_handler(CallbackQueryHandler(button_handler))
+
+    # هندلر عمومی متنی را آخر اضافه کنید تا ConversationHandler اولویت داشته باشد
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
 
     application.add_error_handler(error_handler)
 
