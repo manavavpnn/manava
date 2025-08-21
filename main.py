@@ -1,9 +1,7 @@
 import os
 import json
-import qrcode
 import asyncio
 import logging
-import re
 from aiohttp import web
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ConversationHandler, PicklePersistence
@@ -70,16 +68,6 @@ def save_configs():
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(configs, f, ensure_ascii=False, indent=2)
 
-def make_qr():
-    try:
-        img = qrcode.make(CARD_NUMBER)
-        qr_path = "card_qr.png"
-        img.save(qr_path)
-        return qr_path
-    except Exception as e:
-        logger.error(f"خطا در تولید QR کد: {e}")
-        return None
-
 def group_configs(configs):
     grouped = {}
     for cfg in configs:
@@ -126,10 +114,6 @@ def get_stats():
     pending_orders = sum(1 for order in orders.values() if order['status'] == 'pending')
     return f"📊 آمار:\nکاربران: {len(users_cache)}\nکانفیگ‌ها: {total_configs}\nسفارش‌ها: {total_orders}\nسفارش‌های در انتظار: {pending_orders}"
 
-def is_valid_url(url):
-    regex = r'^(https?|ftp)://[^\s/$.?#].[^\s]*$'
-    return re.match(regex, url) is not None
-
 # ===== هندلرها =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -174,7 +158,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data.startswith("buy_config_"):
         config_id = int(query.data.split("_")[2])
         context.user_data['selected_config'] = config_id
-        qr_path = make_qr()
         config = next((cfg for cfg in configs if cfg['id'] == config_id), None)
         if not config:
             await query.edit_message_text("کانفیگ یافت نشد.")
@@ -182,32 +165,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         order_id = str(len(orders) + 1)
         orders[order_id] = {
             'user_id': query.from_user.id,
+            'username': query.from_user.username or "بدون یوزرنیم",
             'config_id': config_id,
             'status': 'pending'
         }
         save_orders()
-        if qr_path:
+        try:
+            await query.message.reply_text(
+                f"لطفاً مبلغ {config['قیمت']} تومان به شماره کارت زیر واریز کنید:\n{CARD_NUMBER}\nنام: {CARD_NAME}\nID سفارش: {order_id}"
+            )
+            # ارسال نوتیفیکیشن به گروه ادمین
             try:
-                await query.message.reply_photo(
-                    photo=open(qr_path, "rb"),
-                    caption=f"لطفاً مبلغ {config['قیمت']} تومان به شماره کارت زیر واریز کنید:\n{CARD_NUMBER}\nنام: {CARD_NAME}\nID سفارش: {order_id}"
+                await context.bot.send_message(
+                    chat_id=ADMIN_GROUP_ID,
+                    text=f"سفارش جدید:\nکاربر: {query.from_user.id} (@{query.from_user.username or 'بدون یوزرنیم'})\nID سفارش: {order_id}\nکانفیگ: {config['حجم']} - {config['مدت']} - {config['قیمت']}"
                 )
-                # ارسال نوتیفیکیشن به گروه ادمین
-                try:
-                    await context.bot.send_message(
-                        chat_id=ADMIN_GROUP_ID,
-                        text=f"سفارش جدید:\nکاربر: {query.from_user.id}\nID سفارش: {order_id}\nکانفیگ: {config['حجم']} - {config['مدت']} - {config['قیمت']}"
-                    )
-                except Exception as e:
-                    logger.error(f"خطا در ارسال نوتیفیکیشن به گروه ادمین: {e}")
-                finally:
-                    os.remove(qr_path)  # حذف فایل QR
             except Exception as e:
-                logger.error(f"خطا در ارسال تصویر QR: {e}")
-                await query.edit_message_text("خطا در تولید QR کد. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.")
-                return
-        else:
-            await query.edit_message_text("خطا در تولید QR کد. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.")
+                logger.error(f"خطا در ارسال نوتیفیکیشن به گروه ادمین: {e}")
+        except Exception as e:
+            logger.error(f"خطا در ارسال پیام: {e}")
+            await query.edit_message_text("خطا در ثبت سفارش. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.")
             return
         await query.edit_message_text("سفارش شما ثبت شد. پس از پرداخت، منتظر تایید باشید.")
     elif query.data == "cancel":
@@ -215,7 +192,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if user_id not in ADMINS:
+    if user_id not in ADMINS部分 not in ADMINS:
         await update.message.reply_text("❌ دسترسی ندارید.")
         return ConversationHandler.END
     await update.message.reply_text("حجم کانفیگ را وارد کنید (مثل 10GB):")
@@ -245,14 +222,11 @@ async def add_config_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("قیمت باید عدد باشد. لطفاً دوباره تلاش کنید:")
         return ADD_CONFIG_PRICE
     context.user_data['price'] = price
-    await update.message.reply_text("لینک کانفیگ (باید با http یا https شروع شود):")
+    await update.message.reply_text("لینک کانفیگ را وارد کنید:")
     return ADD_CONFIG_LINK
 
 async def add_config_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = update.message.text.strip()
-    if not is_valid_url(link):
-        await update.message.reply_text("لینک نامعتبر است. لطفاً لینک معتبر (با http یا https) وارد کنید:")
-        return ADD_CONFIG_LINK
     new_config = {
         'حجم': context.user_data['volume'],
         'مدت': context.user_data['duration'],
@@ -275,14 +249,15 @@ async def remove_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("هیچ کانفیگی موجود نیست.")
         return ConversationHandler.END
     config_list = "\n".join([f"ID: {cfg['id']} - {cfg['حجم']} - {cfg['مدت']} - {cfg['قیمت']}" for cfg in configs])
-    await update.message.reply_text(f"لیست کانفیگ‌ها:\n{config_list}\nID کانفیگ برای حذف:")
-    return REMOVE_CONFIG_ID
+    await update.message.reply MOEFIELDER_ID:
+        await update.message.reply_text(f"لیست کانفیگ‌ها:\n{config_list}\nID کانفیگ برای حذف:")
+        return REMOVE_CONFIG_ID
 
 async def remove_config_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         config_id = int(update.message.text)
         if any(order['config_id'] == config_id and order['status'] == 'pending' for order in orders.values()):
-            await update.message.reply_text("نمی‌توان کانفیگ را حذف کرد چون در سفارش‌های در انتظار استفاده شده است.")
+            await update.message reply_text("نمی‌توان کانفیگ را حذف کرد چون در سفارش‌های در انتظار استفاده شده است.")
             return ConversationHandler.END
         global configs
         configs = [cfg for cfg in configs if cfg['id'] != config_id]
@@ -301,7 +276,7 @@ async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not orders:
         await update.message.reply_text("هیچ سفارشی وجود ندارد.")
         return
-    order_list = "\n".join([f"Order ID: {oid} - User: {order['user_id']} - Config: {order['config_id']} - Status: {order['status']}" for oid, order in orders.items()])
+    order_list = "\n".join([f"Order ID: {oid} - User: {order['user_id']} (@{order['username']}) - Config: {order['config_id']} - Status: {order['status']}" for oid, order in orders.items()])
     await update.message.reply_text(f"لیست سفارش‌ها:\n{order_list}")
 
 async def approve_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -349,7 +324,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"خطا: {context.error}")
 
 # ===== مسیر پینگ =====
-async def handle_ping(request):
+async famili def handle_ping(request):
     return web.Response(text="OK")
 
 # ===== main =====
@@ -368,7 +343,7 @@ async def main():
         states={
             ADD_CONFIG_VOLUME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_volume)],
             ADD_CONFIG_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_duration)],
-            ADD_CONFIG_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_price)],
+            ADD_CONFIG_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_price])],
             ADD_CONFIG_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_link)],
         },
         fallbacks=[CommandHandler("cancel", cancel, filters=filters.ChatType.PRIVATE)]
