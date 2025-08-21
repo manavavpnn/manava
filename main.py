@@ -338,20 +338,16 @@ async def main():
     application = Application.builder().token(TOKEN).persistence(PicklePersistence("bot_data.pkl")).build()
 
     # ابتدا ConversationHandlerها را اضافه کنید تا اولویت داشته باشند
-    add_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("add_config", add_config, filters=filters.ChatType.PRIVATE)],
-        states={
-            ADD_CONFIG_VOLUME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_volume)],
-            ADD_CONFIG_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_duration)],
-            ADD_CONFIG_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_price])],
-            ADD_CONFIG_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_link)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel, filters=filters.ChatType.PRIVATE)]
-    )
-    application.add_handler(add_conv_handler)
-
-    remove_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("remove_config", remove_config, filters=filters.ChatType.PRIVATE)],
+  add_conv_handler = ConversationHandler(
+    entry_points=[CommandHandler("add_config", add_config, filters=filters.ChatType.PRIVATE)],
+    states={
+        ADD_CONFIG_VOLUME: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_volume)],
+        ADD_CONFIG_DURATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_duration)],
+        ADD_CONFIG_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_price)],
+        ADD_CONFIG_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_link)],
+    },
+    fallbacks=[CommandHandler("cancel", cancel, filters=filters.ChatType.PRIVATE)]
+)
         states={
             REMOVE_CONFIG_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, remove_config_id)],
         },
