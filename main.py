@@ -159,7 +159,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append([InlineKeyboardButton("لغو", callback_data="cancel")])
         await query.edit_message_text("لطفاً یک کانفیگ انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif query.data == "support":
-        await query.edit_message_text("پشتیبانی: @support_username")
+        await query.edit_message_text("پشتیبانی: @manava_vpn")
     elif query.data == "admin_panel":
         keyboard = [
             ["/add_config", "/remove_config"],
