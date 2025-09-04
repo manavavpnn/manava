@@ -297,10 +297,10 @@ async def main():
     load_configs()
 
     request = HTTPXRequest(
-        connection_timeout=30.0,
-        read_timeout=30.0,
-        write_timeout=30.0
-    )
+    connect_timeout=30.0,  # تغییر connection_timeout به connect_timeout
+    read_timeout=30.0,
+    write_timeout=30.0
+)
 
     application = Application.builder().token(TOKEN).persistence(PicklePersistence("bot_data.pkl")).request(request).build()
 
