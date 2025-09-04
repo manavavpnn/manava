@@ -5,6 +5,8 @@ import logging
 from aiohttp import web
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler, ConversationHandler, PicklePersistence
+from telegram.request import HTTPXRequest
+from telegram.error import TimedOut
 
 # ===== تنظیمات =====
 TOKEN = os.getenv("TOKEN")
@@ -133,7 +135,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    try:
+        await query.answer()
+    except TimedOut as e:
+        logger.error(f"Timeout در پاسخ به callback query: {e}", exc_info=True)
+        await query.message.reply_text("خطای اتصال به سرور. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.")
+        return
+    logger.info(f"Callback query received: {query.data}")
     if query.data == "buy":
         if not configs:
             await query.edit_message_text("هیچ کانفیگی موجود نیست.")
@@ -378,7 +386,14 @@ async def main():
     load_blacklist()
     load_configs()
 
-    application = Application.builder().token(TOKEN).persistence(PicklePersistence("bot_data.pkl")).build()
+    # تنظیم HTTPXRequest با Timeout افزایش‌یافته
+    request = HTTPXRequest(
+        connection_timeout=30.0,  # افزایش زمان اتصال به 30 ثانیه
+        read_timeout=30.0,        # افزایش زمان خواندن به 30 ثانیه
+        write_timeout=30.0        # افزایش زمان نوشتن به 30 ثانیه
+    )
+
+    application = Application.builder().token(TOKEN).persistence(PicklePersistence("bot_data.pkl")).request(request).build()
 
     add_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("add_config", add_config, filters=filters.ChatType.PRIVATE)],
