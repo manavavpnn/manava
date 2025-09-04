@@ -525,7 +525,19 @@ async def main():
 
     # راه‌اندازی سرور aiohttp
     app = web.Application()
-    app.router.add_post(f"/{TOKEN}", lambda request: web.Response(text="OK"))
+    
+    # تعریف وب‌هوک هندلر
+    async def webhook_handler(request):
+        try:
+            data = await request.json()
+            update = Update.de_json(data, application.bot)
+            await application.process_update(update)
+            return web.Response(status=200)
+        except Exception as e:
+            logger.error(f"خطا در پردازش وب‌هوک: {e}")
+            return web.Response(status=400)
+    
+    app.router.add_post(f"/{TOKEN}", webhook_handler)
     app.router.add_get("/ping", handle_ping)
 
     runner = web.AppRunner(app)
@@ -533,17 +545,16 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
 
-    # شروع polling (برای تست)
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
+    logger.info(f"ربات شروع به کار کرد. پورت: {PORT}")
 
     try:
-        await asyncio.Event().wait()
+        # اجرای نامحدود
+        await asyncio.Future()
+    except asyncio.CancelledError:
+        logger.info("ربات در حال خاموش شدن است...")
     finally:
-        await application.updater.stop()
-        await application.stop()
         await runner.cleanup()
+        await application.shutdown()
 
 if __name__ == "__main__":
     asyncio.run(main())
