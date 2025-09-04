@@ -104,6 +104,15 @@ def get_stats():
     pending_orders = sum(1 for order in orders.values() if order['status'] == 'pending')
     return f"📊 آمار:\nکاربران: {len(users_cache)}\nکانفیگ‌ها: {total_configs}\nسفارش‌ها: {total_orders}\nسفارش‌های در انتظار: {pending_orders}"
 
+def group_configs(configs):
+    grouped = {}
+    for config in configs:
+        key = f"{config['حجم']} - {config['مدت']}"
+        if key not in grouped:
+            grouped[key] = []
+        grouped[key].append(config)
+    return grouped
+
 # ===== هندلرها =====
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
