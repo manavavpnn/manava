@@ -21,7 +21,7 @@ from telegram.error import TimedOut
 # ===== تنظیمات =====
 TOKEN = os.getenv("TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-PORT = int(os.getenv("PORT", 8080))
+PORT = int(os.getenv("PORT", 10000))
 ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID", "-1001234567890")
 
 ADMINS = [8122737247, 7844158638]
@@ -288,7 +288,7 @@ async def add_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in blacklist or user_id not in ADMINS:
         await update.message.reply_text("❌ دسترسی ندارید.")
         return ConversationHandler.END
-    await update.message.reply_text("حجم کانفیگ را وارد کنید (مثل 10GB):")
+    await update.message.reply_text("حجم کانфиگ را وارد کنید (مثل 10GB):")
     return ADD_CONFIG_VOLUME
 
 async def add_config_volume(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -441,25 +441,6 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_ping(request):
     return web.Response(text="OK")
 
-# ===== قفل برای دسترسی به فایل‌ها =====
-file_lock = asyncio.Lock()
-
-async def async_save_configs():
-    async with file_lock:
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(configs, f, ensure_ascii=False, indent=2)
-
-async def async_save_orders():
-    async with file_lock:
-        with open(ORDERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(orders, f, ensure_ascii=False, indent=2)
-
-async def async_save_blacklist():
-    async with file_lock:
-        with open(BLACKLIST_FILE, "w") as f:
-            for user_id in blacklist:
-                f.write(f"{user_id}\n")
-
 # ===== main =====
 async def main():
     try:
@@ -473,19 +454,11 @@ async def main():
     load_blacklist()
     load_configs()
 
-    # تنظیم HTTPXRequest با Timeout افزایش‌یافته
-    request = HTTPXRequest(
-        connect_timeout=30.0,
-        read_timeout=30.0,
-        write_timeout=30.0
-    )
-
-    # ساخت Application با استفاده از جدیدترین API
+    # ساخت Application
     application = (
         Application.builder()
         .token(TOKEN)
         .persistence(PicklePersistence(filepath="bot_data.pkl"))
-        .request(request)
         .build()
     )
 
@@ -520,6 +493,10 @@ async def main():
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, start))
     application.add_error_handler(error_handler)
 
+    # راه‌اندازی Application
+    await application.initialize()
+    await application.start()
+    
     # راه‌اندازی وب‌هوک
     await application.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}")
 
@@ -553,8 +530,8 @@ async def main():
     except asyncio.CancelledError:
         logger.info("ربات در حال خاموش شدن است...")
     finally:
+        await application.stop()
         await runner.cleanup()
-        await application.shutdown()
 
 if __name__ == "__main__":
     asyncio.run(main())
