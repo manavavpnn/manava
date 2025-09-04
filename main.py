@@ -22,7 +22,7 @@ from telegram.error import TimedOut
 TOKEN = os.getenv("TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 10000))
-ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID", "-1001234567890")
+ADMIN_GROUP_ID = os.getenv("ADMIN_GROUP_ID", "2944289128")
 
 ADMINS = [8122737247, 7844158638]
 CONFIG_FILE = "configs.json"
