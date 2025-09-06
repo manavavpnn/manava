@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 # ===== حالت‌های کانورسیشن =====
 ADD_CONFIG_VOLUME, ADD_CONFIG_DURATION, ADD_CONFIG_PRICE, ADD_CONFIG_LINK = range(4)
-REMOVE_CONFIG_ID, APPROVE_ORDER_ID = range(2)  # اضافه کردن برای approve دستی اگر نیاز
+REMOVE_CONFIG_ID = 0  # approve دستی حذف شد
 
 # ===== توابع کمکی =====
 def check_env():
@@ -181,8 +181,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "admin_panel":
         keyboard = [
             ["/add_config", "/remove_config"],
-            ["/list_orders", "/approve_order"],
-            ["/stats", "/cancel"]
+            ["/list_orders", "/stats", "/cancel"]  # approve_order حذف شد
         ]
         await query.edit_message_text("پنل ادمین باز شد.")
         await query.message.reply_text(
@@ -208,26 +207,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             await query.edit_message_text(
-                f"لطفاً مبلغ {config['قیمت']} تومان به شماره کارت زیر واریز کنید:\n{CARD_NUMBER}\nنام: {CARD_NAME}\nID سفارش: {order_id}\nلطفاً رسید پرداخت را به پشتیبانی ارسال کنید."
+                f"لطفاً مبلغ {config['قیمت']} تومان به شماره کارت زیر واریز کنید:\n{CARD_NUMBER}\nنام: {CARD_NAME}\nID سفارش: {order_id}\nلطفاً عکس رسید پرداخت را اینجا ارسال کنید."
             )
-            
-            # کامنت شده برای تست: ارسال به گروه ادمین
-            # admin_keyboard = InlineKeyboardMarkup([
-            #     [InlineKeyboardButton("✅ تأیید پرداخت", callback_data=f"approve_{order_id}"),
-            #      InlineKeyboardButton("❌ رد پرداخت", callback_data=f"reject_{order_id}")]
-            # ])
-            # 
-            # admin_message = await context.bot.send_message(
-            #     chat_id=ADMIN_GROUP_ID,
-            #     text=f"📨 سفارش جدید:\n👤 کاربر: {query.from_user.mention_markdown()}\n🆔 ID کاربر: {query.from_user.id}\n📋 ID سفارش: {order_id}\n⚙️ کانفیگ: {config['حجم']} - {config['مدت']}\n💰 قیمت: {config['قیمت']} تومان",
-            #     reply_markup=admin_keyboard,
-            #     parse_mode='Markdown'
-            # )
-            # 
-            # orders[order_id]['admin_chat_id'] = admin_message.chat_id
-            # orders[order_id]['admin_message_id'] = admin_message.message_id
-            # save_orders()  # ذخیره بعد از اضافه chat_id و message_id
-            
+            context.user_data['pending_order_id'] = order_id  # برای منتظر ماندن رسید
         except Exception as e:
             logger.error(f"خطا در ارسال پیام: {e}", exc_info=True)
             await query.edit_message_text("خطا در ثبت سفارش. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.")
@@ -248,7 +230,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 await context.bot.send_message(
                     chat_id=order['user_id'],
-                    text=f"✅ پرداخت شما تأیید شد!\n🎉 کانفیگ شما:\n{config['لینک']}"
+                    text=f"✅ پرداخت شما تأیید شد!\n🎉 کانفیگ شما:\n`{config['لینک']}`",
+                    parse_mode='Markdown'
                 )
                 orders[order_id]['status'] = 'approved'
                 save_orders()
@@ -256,6 +239,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # حذف کانفیگ فروخته‌شده برای جلوگیری از فروش دوباره
                 configs.remove(config)
                 save_configs()
+                
+                # ویرایش پیام‌های ادمین
+                if 'admin_messages' in order:
+                    for admin_id, message_id in order['admin_messages'].items():
+                        await context.bot.edit_message_text(
+                            chat_id=admin_id,
+                            message_id=message_id,
+                            text=query.message.text + "\n✅ پرداخت تأیید شد.",
+                            reply_markup=None
+                        )
                 
                 await query.edit_message_text(
                     text=f"✅ پرداخت تأیید شد:\n👤 کاربر: {order['user_id']}\n📋 سفارش: {order_id}",
@@ -287,6 +280,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 chat_id=order['user_id'],
                 text="❌ پرداخت شما رد شد!\n⚠️ لطفاً به پشتیبانی مراجعه کنید: @manava_vpn"
             )
+            
+            # ویرایش پیام‌های ادمین
+            if 'admin_messages' in order:
+                for admin_id, message_id in order['admin_messages'].items():
+                    await context.bot.edit_message_text(
+                        chat_id=admin_id,
+                        message_id=message_id,
+                        text=query.message.text + "\n❌ پرداخت رد شد.",
+                        reply_markup=None
+                    )
         except Exception as e:
             logger.error(f"خطا در ارسال پیام به کاربر: {e}")
         
@@ -297,6 +300,77 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif query.data == "cancel":
         await query.edit_message_text("عملیات لغو شد.")
+        if 'pending_order_id' in context.user_data:
+            del context.user_data['pending_order_id']
+
+async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id in ADMINS:  # جلوگیری از تداخل با ادمین
+        return
+    if 'pending_order_id' not in context.user_data:
+        await update.message.reply_text("لطفاً ابتدا سفارش ثبت کنید.")
+        return
+    
+    order_id = context.user_data.pop('pending_order_id')
+    if order_id not in orders or orders[order_id]['status'] != 'pending':
+        await update.message.reply_text("سفارش نامعتبر است.")
+        return
+    
+    if not update.message.photo:
+        await update.message.reply_text("لطفاً عکس رسید ارسال کنید.")
+        context.user_data['pending_order_id'] = order_id  # دوباره منتظر بماند
+        return
+    
+    photo_id = update.message.photo[-1].file_id
+    orders[order_id]['receipt_photo'] = photo_id
+    save_orders()
+    
+    await update.message.reply_text("✅ رسید دریافت شد. منتظر تایید ادمین باشید.")
+    
+    order = orders[order_id]
+    config = next((cfg for cfg in configs if cfg['id'] == order['config_id']), None)
+    if not config:
+        logger.error("کانفیگ یافت نشد برای سفارش: " + order_id)
+        return
+    
+    text = f"📨 سفارش جدید با رسید:\n👤 کاربر: {update.effective_user.mention_markdown()}\n🆔 ID کاربر: {order['user_id']}\n📋 ID سفارش: {order_id}\n⚙️ کانفیگ: {config['حجم']} - {config['مدت']}\n💰 قیمت: {config['قیمت']} تومان"
+    
+    admin_keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ تأیید پرداخت", callback_data=f"approve_{order_id}"),
+         InlineKeyboardButton("❌ رد پرداخت", callback_data=f"reject_{order_id}")]
+    ])
+    
+    admin_messages = {}
+    for admin in ADMINS:
+        try:
+            admin_message = await context.bot.send_photo(
+                chat_id=admin,
+                photo=photo_id,
+                caption=text,
+                reply_markup=admin_keyboard,
+                parse_mode='Markdown'
+            )
+            admin_messages[admin] = admin_message.message_id
+        except Exception as e:
+            logger.error(f"خطا در ارسال به ادمین {admin}: {e}")
+    
+    orders[order_id]['admin_messages'] = admin_messages
+    save_orders()
+    
+    # کامنت شده: ارسال به گروه
+    # try:
+    #     group_message = await context.bot.send_photo(
+    #         chat_id=ADMIN_GROUP_ID,
+    #         photo=photo_id,
+    #         caption=text,
+    #         reply_markup=admin_keyboard,
+    #         parse_mode='Markdown'
+    #     )
+    #     orders[order_id]['group_chat_id'] = group_message.chat_id
+    #     orders[order_id]['group_message_id'] = group_message.message_id
+    #     save_orders()
+    # except Exception as e:
+    #     logger.error(f"خطا در ارسال به گروه: {e}")
 
 # ===== هندلرهای ادمین =====
 async def add_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -379,57 +453,6 @@ async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"🆔 سفارش: {oid}\n👤 کاربر: {o['user_id']} (@{o['username']})\n⚙️ کانفیگ: {config_info}\n\n"
     await update.message.reply_text(text)
 
-async def approve_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    if user_id not in ADMINS:
-        await update.message.reply_text("❌ دسترسی ندارید.")
-        return ConversationHandler.END
-    await update.message.reply_text("ID سفارش را برای تأیید وارد کنید:")
-    return APPROVE_ORDER_ID
-
-async def approve_order_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    try:
-        order_id = update.message.text.strip()
-        if order_id not in orders:
-            await update.message.reply_text("❌ سفارش یافت نشد!")
-            return ConversationHandler.END
-        
-        order = orders[order_id]
-        if order['status'] != 'pending':
-            await update.message.reply_text("❌ این سفارش قبلاً پردازش شده است!")
-            return ConversationHandler.END
-        
-        config = next((cfg for cfg in configs if cfg['id'] == order['config_id']), None)
-        if not config:
-            await update.message.reply_text("❌ کانفیگ یافت نشد!")
-            return ConversationHandler.END
-        
-        await context.bot.send_message(
-            chat_id=order['user_id'],
-            text=f"✅ پرداخت شما تأیید شد!\n🎉 کانفیگ شما:\n{config['لینک']}"
-        )
-        orders[order_id]['status'] = 'approved'
-        save_orders()
-        
-        # حذف کانفیگ
-        configs.remove(config)
-        save_configs()
-        
-        # کامنت شده: ویرایش پیام ادمین (چون ارسال به گروه کامنت است)
-        # if 'admin_message_id' in order and 'admin_chat_id' in order:
-        #     await context.bot.edit_message_text(
-        #         chat_id=order['admin_chat_id'],
-        #         message_id=order['admin_message_id'],
-        #         text=f"✅ پرداخت تأیید شد:\n👤 کاربر: {order['user_id']}\n📋 سفارش: {order_id}",
-        #         reply_markup=None
-        #     )
-        
-        await update.message.reply_text("✅ سفارش تأیید شد.")
-    except Exception as e:
-        logger.error(f"خطا در تأیید دستی: {e}")
-        await update.message.reply_text("❌ خطا در پردازش!")
-    return ConversationHandler.END
-
 async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in ADMINS:
@@ -485,23 +508,16 @@ async def main():
         fallbacks=[CommandHandler("cancel", cancel)]
     )
     
-    approve_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("approve_order", approve_order)],
-        states={
-            APPROVE_ORDER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, approve_order_id)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)]
-    )
-    
     application.add_handler(add_conv_handler)
     application.add_handler(remove_conv_handler)
-    application.add_handler(approve_conv_handler)
+    # approve_conv_handler حذف شد
 
     # سایر هندلرها
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("list_orders", list_orders))
     application.add_handler(CommandHandler("stats", stats_handler))
     application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_receipt))
     application.add_error_handler(lambda u, c: logger.error(f"خطا: {c.error}", exc_info=True))
 
     await application.initialize()
