@@ -211,21 +211,22 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"لطفاً مبلغ {config['قیمت']} تومان به شماره کارت زیر واریز کنید:\n{CARD_NUMBER}\nنام: {CARD_NAME}\nID سفارش: {order_id}\nلطفاً رسید پرداخت را به پشتیبانی ارسال کنید."
             )
             
-            admin_keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ تأیید پرداخت", callback_data=f"approve_{order_id}"),
-                 InlineKeyboardButton("❌ رد پرداخت", callback_data=f"reject_{order_id}")]
-            ])
-            
-            admin_message = await context.bot.send_message(
-                chat_id=ADMIN_GROUP_ID,
-                text=f"📨 سفارش جدید:\n👤 کاربر: {query.from_user.mention_markdown()}\n🆔 ID کاربر: {query.from_user.id}\n📋 ID سفارش: {order_id}\n⚙️ کانفیگ: {config['حجم']} - {config['مدت']}\n💰 قیمت: {config['قیمت']} تومان",
-                reply_markup=admin_keyboard,
-                parse_mode='Markdown'
-            )
-            
-            orders[order_id]['admin_chat_id'] = admin_message.chat_id
-            orders[order_id]['admin_message_id'] = admin_message.message_id
-            save_orders()  # ذخیره بعد از اضافه chat_id و message_id
+            # کامنت شده برای تست: ارسال به گروه ادمین
+            # admin_keyboard = InlineKeyboardMarkup([
+            #     [InlineKeyboardButton("✅ تأیید پرداخت", callback_data=f"approve_{order_id}"),
+            #      InlineKeyboardButton("❌ رد پرداخت", callback_data=f"reject_{order_id}")]
+            # ])
+            # 
+            # admin_message = await context.bot.send_message(
+            #     chat_id=ADMIN_GROUP_ID,
+            #     text=f"📨 سفارش جدید:\n👤 کاربر: {query.from_user.mention_markdown()}\n🆔 ID کاربر: {query.from_user.id}\n📋 ID سفارش: {order_id}\n⚙️ کانفیگ: {config['حجم']} - {config['مدت']}\n💰 قیمت: {config['قیمت']} تومان",
+            #     reply_markup=admin_keyboard,
+            #     parse_mode='Markdown'
+            # )
+            # 
+            # orders[order_id]['admin_chat_id'] = admin_message.chat_id
+            # orders[order_id]['admin_message_id'] = admin_message.message_id
+            # save_orders()  # ذخیره بعد از اضافه chat_id و message_id
             
         except Exception as e:
             logger.error(f"خطا در ارسال پیام: {e}", exc_info=True)
@@ -414,14 +415,14 @@ async def approve_order_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         configs.remove(config)
         save_configs()
         
-        # اگر پیام ادمین وجود داشته باشد، ویرایش کن
-        if 'admin_message_id' in order and 'admin_chat_id' in order:
-            await context.bot.edit_message_text(
-                chat_id=order['admin_chat_id'],
-                message_id=order['admin_message_id'],
-                text=f"✅ پرداخت تأیید شد:\n👤 کاربر: {order['user_id']}\n📋 سفارش: {order_id}",
-                reply_markup=None
-            )
+        # کامنت شده: ویرایش پیام ادمین (چون ارسال به گروه کامنت است)
+        # if 'admin_message_id' in order and 'admin_chat_id' in order:
+        #     await context.bot.edit_message_text(
+        #         chat_id=order['admin_chat_id'],
+        #         message_id=order['admin_message_id'],
+        #         text=f"✅ پرداخت تأیید شد:\n👤 کاربر: {order['user_id']}\n📋 سفارش: {order_id}",
+        #         reply_markup=None
+        #     )
         
         await update.message.reply_text("✅ سفارش تأیید شد.")
     except Exception as e:
