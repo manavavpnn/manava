@@ -22,16 +22,16 @@ from telegram.error import TimedOut
 TOKEN = os.getenv("TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 10000))
-ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID", 2944289128))
+ADMIN_GROUP_ID = int(os.getenv("ADMIN_GROUP_ID"))  # الزامی کردن env بدون default
 
-ADMINS = [8122737247, 7844158638]
+ADMINS = list(map(int, os.getenv("ADMINS", "8122737247,7844158638").split(',')))  # از env بخوان، default هاردکد اما بهتر env
 CONFIG_FILE = "configs.json"
 USERS_FILE = "users.txt"
 ORDERS_FILE = "orders.json"
 BLACKLIST_FILE = "blacklist.txt"
 
-CARD_NUMBER = os.getenv("CARD_NUMBER", "6219861812104395")
-CARD_NAME = os.getenv("CARD_NAME", "سجاد مؤیدی")
+CARD_NUMBER = os.getenv("CARD_NUMBER")  # الزامی بدون default
+CARD_NAME = os.getenv("CARD_NAME")  # الزامی بدون default
 
 blacklist = set()
 orders = {}
@@ -50,23 +50,28 @@ logger = logging.getLogger(__name__)
 
 # ===== حالت‌های کانورسیشن =====
 ADD_CONFIG_VOLUME, ADD_CONFIG_DURATION, ADD_CONFIG_PRICE, ADD_CONFIG_LINK = range(4)
-REMOVE_CONFIG_ID = 0
+REMOVE_CONFIG_ID, APPROVE_ORDER_ID = range(2)  # اضافه کردن برای approve دستی اگر نیاز
 
 # ===== توابع کمکی =====
 def check_env():
+    missing = []
     if not TOKEN:
-        raise ValueError("❌ TOKEN در محیط ست نشده!")
+        missing.append("TOKEN")
     if not WEBHOOK_URL:
-        raise ValueError("❌ WEBHOOK_URL در محیط ست نشده!")
+        missing.append("WEBHOOK_URL")
     if not WEBHOOK_URL.startswith("https://"):
-        raise ValueError("WEBHOOK_URL باید HTTPS باشه!")
+        raise ValueError("WEBHOOK_URL باید HTTPS باشد!")
     if not ADMIN_GROUP_ID:
-        raise ValueError("❌ ADMIN_GROUP_ID در محیط ست نشده!")
+        missing.append("ADMIN_GROUP_ID")
+    if not CARD_NUMBER:
+        missing.append("CARD_NUMBER")
+    if not CARD_NAME:
+        missing.append("CARD_NAME")
+    if missing:
+        raise ValueError(f"❌ متغیرهای محیطی زیر ست نشده‌اند: {', '.join(missing)}")
 
 def save_user(user_id: int) -> int:
     global users_cache
-    if not os.path.exists(USERS_FILE):
-        open(USERS_FILE, "w", encoding="utf-8").close()
     if str(user_id) not in users_cache:
         with open(USERS_FILE, "a", encoding="utf-8") as f:
             f.write(str(user_id) + "\n")
@@ -74,14 +79,12 @@ def save_user(user_id: int) -> int:
     return len(users_cache)
 
 def load_configs():
-    global configs
+    global configs, config_id_counter
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             configs = json.load(f)
-        # به‌روزرسانی شمارنده ID
         if configs:
             max_id = max(cfg["id"] for cfg in configs)
-            global config_id_counter
             config_id_counter = itertools.count(max_id + 1)
     else:
         configs = []
@@ -120,6 +123,8 @@ def load_users_cache():
     if os.path.exists(USERS_FILE):
         with open(USERS_FILE, "r", encoding="utf-8") as f:
             users_cache = {line.strip() for line in f if line.strip()}
+    else:
+        open(USERS_FILE, "w", encoding="utf-8").close()
 
 def get_stats():
     total_configs = len(configs)
@@ -163,7 +168,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("هیچ کانفیگی موجود نیست.")
             return
         grouped = group_configs(configs)
-        keyboard = [[InlineKeyboardButton(f"{key} (موجود: {len(cfgs)})", callback_data=f"buy_config_{cfgs[0]['id']}")] for key, cfgs in grouped.items()]
+        keyboard = []
+        for key, cfgs in grouped.items():
+            if cfgs:  # مطمئن شو موجود باشد
+                keyboard.append([InlineKeyboardButton(f"{key} (موجود: {len(cfgs)})", callback_data=f"buy_config_{cfgs[0]['id']}")])
         keyboard.append([InlineKeyboardButton("لغو", callback_data="cancel")])
         await query.edit_message_text("لطفاً یک کانفیگ انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
     
@@ -217,6 +225,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             orders[order_id]['admin_chat_id'] = admin_message.chat_id
             orders[order_id]['admin_message_id'] = admin_message.message_id
+            save_orders()  # ذخیره بعد از اضافه chat_id و message_id
             
         except Exception as e:
             logger.error(f"خطا در ارسال پیام: {e}", exc_info=True)
@@ -242,6 +251,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 orders[order_id]['status'] = 'approved'
                 save_orders()
+                
+                # حذف کانفیگ فروخته‌شده برای جلوگیری از فروش دوباره
+                configs.remove(config)
+                save_configs()
                 
                 await query.edit_message_text(
                     text=f"✅ پرداخت تأیید شد:\n👤 کاربر: {order['user_id']}\n📋 سفارش: {order_id}",
@@ -284,30 +297,28 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "cancel":
         await query.edit_message_text("عملیات لغو شد.")
 
-# ===== سایر هندلرهای ادمین (add/remove/list/approve) =====
-# (بدون تغییر بزرگ – فقط قسمت ID یکتا اصلاح شده)
-
-async def add_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ===== هندلرهای ادمین =====
+async def add_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
-    if user_id in blacklist or user_id not in ADMINS:
+    if user_id not in ADMINS:
         await update.message.reply_text("❌ دسترسی ندارید.")
         return ConversationHandler.END
     await update.message.reply_text("حجم کانفیگ را وارد کنید (مثل 10GB):")
     return ADD_CONFIG_VOLUME
 
-async def add_config_volume(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_config_volume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     volume = update.message.text.strip()
     context.user_data['volume'] = volume
     await update.message.reply_text("مدت زمان (مثل 30 روز):")
     return ADD_CONFIG_DURATION
 
-async def add_config_duration(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_config_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     duration = update.message.text.strip()
     context.user_data['duration'] = duration
     await update.message.reply_text("قیمت (به تومان، فقط عدد):")
     return ADD_CONFIG_PRICE
 
-async def add_config_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_config_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     price = update.message.text.strip()
     if not price.isdigit():
         await update.message.reply_text("قیمت باید عدد باشد. لطفاً دوباره تلاش کنید:")
@@ -316,7 +327,7 @@ async def add_config_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("لینک کانفیگ را وارد کنید:")
     return ADD_CONFIG_LINK
 
-async def add_config_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def add_config_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     link = update.message.text.strip()
     new_config = {
         'حجم': context.user_data['volume'],
@@ -329,6 +340,104 @@ async def add_config_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_configs()
     await update.message.reply_text(f"کانفیگ جدید اضافه شد: {new_config}")
     context.user_data.clear()
+    return ConversationHandler.END
+
+async def remove_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    if user_id not in ADMINS:
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return ConversationHandler.END
+    await update.message.reply_text("ID کانفیگ را برای حذف وارد کنید:")
+    return REMOVE_CONFIG_ID
+
+async def remove_config_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        config_id = int(update.message.text.strip())
+        global configs
+        configs = [cfg for cfg in configs if cfg['id'] != config_id]
+        save_configs()
+        await update.message.reply_text("✅ کانفیگ حذف شد.")
+    except ValueError:
+        await update.message.reply_text("❌ ID نامعتبر. لطفاً عدد وارد کنید.")
+    return ConversationHandler.END
+
+async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMINS:
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return
+    text = "📋 سفارش‌های در انتظار:\n"
+    pending_orders = [ (oid, o) for oid, o in orders.items() if o['status'] == 'pending' ]
+    if not pending_orders:
+        text += "هیچ سفارشی در انتظار نیست."
+    else:
+        for oid, o in pending_orders:
+            config_id = o['config_id']
+            config = next((cfg for cfg in configs if cfg['id'] == config_id), None)
+            config_info = f"{config['حجم']} - {config['مدت']}" if config else "نامشخص"
+            text += f"🆔 سفارش: {oid}\n👤 کاربر: {o['user_id']} (@{o['username']})\n⚙️ کانفیگ: {config_info}\n\n"
+    await update.message.reply_text(text)
+
+async def approve_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    if user_id not in ADMINS:
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return ConversationHandler.END
+    await update.message.reply_text("ID سفارش را برای تأیید وارد کنید:")
+    return APPROVE_ORDER_ID
+
+async def approve_order_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        order_id = update.message.text.strip()
+        if order_id not in orders:
+            await update.message.reply_text("❌ سفارش یافت نشد!")
+            return ConversationHandler.END
+        
+        order = orders[order_id]
+        if order['status'] != 'pending':
+            await update.message.reply_text("❌ این سفارش قبلاً پردازش شده است!")
+            return ConversationHandler.END
+        
+        config = next((cfg for cfg in configs if cfg['id'] == order['config_id']), None)
+        if not config:
+            await update.message.reply_text("❌ کانفیگ یافت نشد!")
+            return ConversationHandler.END
+        
+        await context.bot.send_message(
+            chat_id=order['user_id'],
+            text=f"✅ پرداخت شما تأیید شد!\n🎉 کانفیگ شما:\n{config['لینک']}"
+        )
+        orders[order_id]['status'] = 'approved'
+        save_orders()
+        
+        # حذف کانفیگ
+        configs.remove(config)
+        save_configs()
+        
+        # اگر پیام ادمین وجود داشته باشد، ویرایش کن
+        if 'admin_message_id' in order and 'admin_chat_id' in order:
+            await context.bot.edit_message_text(
+                chat_id=order['admin_chat_id'],
+                message_id=order['admin_message_id'],
+                text=f"✅ پرداخت تأیید شد:\n👤 کاربر: {order['user_id']}\n📋 سفارش: {order_id}",
+                reply_markup=None
+            )
+        
+        await update.message.reply_text("✅ سفارش تأیید شد.")
+    except Exception as e:
+        logger.error(f"خطا در تأیید دستی: {e}")
+        await update.message.reply_text("❌ خطا در پردازش!")
+    return ConversationHandler.END
+
+async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMINS:
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return
+    await update.message.reply_text(get_stats())
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("عملیات لغو شد.")
     return ConversationHandler.END
 
 # ===== مسیر پینگ =====
@@ -364,15 +473,33 @@ async def main():
             ADD_CONFIG_PRICE: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_price)],
             ADD_CONFIG_LINK: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_config_link)],
         },
-        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)]
+        fallbacks=[CommandHandler("cancel", cancel)]
     )
+    
+    remove_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("remove_config", remove_config)],
+        states={
+            REMOVE_CONFIG_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, remove_config_id)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+    
+    approve_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("approve_order", approve_order)],
+        states={
+            APPROVE_ORDER_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, approve_order_id)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+    
     application.add_handler(add_conv_handler)
+    application.add_handler(remove_conv_handler)
+    application.add_handler(approve_conv_handler)
 
     # سایر هندلرها
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("list_orders", lambda u, c: None))  # جایگزین با توابع اصلی
-    application.add_handler(CommandHandler("approve_order", lambda u, c: None))
-    application.add_handler(CommandHandler("stats", lambda u, c: None))
+    application.add_handler(CommandHandler("list_orders", list_orders))
+    application.add_handler(CommandHandler("stats", stats_handler))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_error_handler(lambda u, c: logger.error(f"خطا: {c.error}", exc_info=True))
 
