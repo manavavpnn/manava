@@ -150,12 +150,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user(user_id)
     keyboard = [
         [InlineKeyboardButton("💳 خرید کانفیگ", callback_data="buy")],
-        [InlineKeyboardButton("📞 پشتیبانی", callback_data="support")]
+        [InlineKeyboardButton("📞تماس با پشتیبانی", callback_data="support")]
     ]
     if user_id in ADMINS:
         keyboard.append([InlineKeyboardButton("🔧 پنل ادمین", callback_data="admin_panel")])
     await update.message.reply_text(
-        "سلام 👋\nبه ربات فروش کانفیگ خوش آمدید.",
+        "سلام 👋\nبه ماناوا خوش آمدید.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -165,7 +165,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query.data == "buy":
         if not configs:
-            await query.edit_message_text("هیچ کانفیگی موجود نیست.")
+            await query.edit_message_text(" موجودی سرور ها تمام شده،جهت ثبت سفارش به پشتیبانی مراجعه کنید.")
             return
         grouped = group_configs(configs)
         keyboard = []
@@ -207,13 +207,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             await query.edit_message_text(
-                f"لطفاً مبلغ {config['قیمت']} تومان به شماره کارت زیر واریز کنید:\n`{CARD_NUMBER}`\nنام: {CARD_NAME}\nID سفارش: {order_id}\nلطفاً عکس رسید پرداخت را اینجا ارسال کنید.",
+                f"لطفاً مبلغ {config['قیمت']} تومان به شماره کارت زیر واریز کنید:\n`{CARD_NUMBER}`\nنام: {CARD_NAME}\nID سفارش: {order_id}\nلطفاً عکس رسید پرداخت خود را همینجا ارسال کنید.",
                 parse_mode='Markdown'
             )
             context.user_data['pending_order_id'] = order_id  # برای منتظر ماندن رسید
         except Exception as e:
             logger.error(f"خطا در ارسال پیام: {e}", exc_info=True)
-            await query.edit_message_text("خطا در ثبت سفارش. لطفاً دوباره تلاش کنید یا با پشتیبانی تماس بگیرید.")
+            await query.edit_message_text("خطا در ثبت سفارش. لطفاً دوباره تلاش کنید و بعد با پشتیبانی تماس بگیرید.")
     
     elif query.data.startswith("approve_"):
         order_id = query.data.split("_")[1]
