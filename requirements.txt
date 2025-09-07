@@ -3,3 +3,4 @@ aiohttp==3.9.1
 gunicorn
 qrcode
 python-dotenv
+aiofiles
