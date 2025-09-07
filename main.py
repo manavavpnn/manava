@@ -356,21 +356,19 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     orders[order_id]['admin_messages'] = admin_messages
     save_orders()
-    
-    # کامنت شده: ارسال به گروه
-    # try:
-    #     group_message = await context.bot.send_photo(
-    #         chat_id=ADMIN_GROUP_ID,
-    #         photo=photo_id,
-    #         caption=text,
-    #         reply_markup=admin_keyboard,
-    #         parse_mode='Markdown'
-    #     )
-    #     orders[order_id]['group_chat_id'] = group_message.chat_id
-    #     orders[order_id]['group_message_id'] = group_message.message_id
-    #     save_orders()
-    # except Exception as e:
-    #     logger.error(f"خطا در ارسال به گروه: {e}")
+    try:
+         group_message = await context.bot.send_photo(
+             chat_id=ADMIN_GROUP_ID,
+             photo=photo_id,
+             caption=text,
+             reply_markup=admin_keyboard,
+             parse_mode='Markdown'
+         )
+         orders[order_id]['group_chat_id'] = group_message.chat_id
+         orders[order_id]['group_message_id'] = group_message.message_id
+         save_orders()
+     except Exception as e:
+         logger.error(f"خطا در ارسال به گروه: {e}")
 
 # ===== هندلرهای ادمین =====
 async def add_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
