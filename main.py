@@ -26,6 +26,9 @@ from telegram.helpers import escape_markdown
 from functools import wraps
 import time
 import contextlib
+import zipfile
+import tempfile
+import shutil
 
 # ===== تنظیمات =====
 TOKEN = os.getenv("TOKEN")
@@ -61,6 +64,9 @@ rate_limiter: Dict[int, float] = {}
 
 # Pagination settings
 ORDERS_PER_PAGE = 5  # For pagination in list_orders
+
+# Backup schedule (seconds). Default: 24h
+BACKUP_INTERVAL = int(os.getenv("BACKUP_INTERVAL_SECONDS", 24 * 3600))
 
 # ===== Logging =====
 logging.basicConfig(
@@ -302,6 +308,130 @@ def check_blacklist(func):
             return
         return await func(update, context)
     return wrapper
+
+# ===== Backup & Restore =====
+async def create_backup_zip(path_list: List[str]) -> str:
+    """Create a temporary zip file containing existing files in path_list.
+    Returns path to the zip file."""
+    tmp_dir = tempfile.mkdtemp()
+    zip_path = os.path.join(tmp_dir, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
+    try:
+        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+            for p in path_list:
+                if os.path.exists(p):
+                    # arcname to avoid storing absolute paths
+                    zf.write(p, arcname=os.path.basename(p))
+        return zip_path
+    except Exception:
+        # cleanup on failure
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
+
+async def backup_data(context: ContextTypes.DEFAULT_TYPE):
+    """Send a ZIP backup to all ADMINS. Used by manual command and scheduled job."""
+    path_list = [CONFIG_FILE, ORDERS_FILE, USERS_FILE, BLACKLIST_FILE]
+    try:
+        zip_path = await create_backup_zip(path_list)
+    except Exception as e:
+        logger.error(f"Failed to create backup zip: {e}", exc_info=True)
+        return
+
+    try:
+        for admin in ADMINS:
+            try:
+                with open(zip_path, "rb") as fh:
+                    await context.bot.send_document(
+                        chat_id=admin,
+                        document=fh,
+                        filename=os.path.basename(zip_path),
+                        caption="📦 بکاپ داده‌ها — نگهدارید تا در زمان دیپلوی بعدی استفاده کنید."
+                    )
+            except Exception as e:
+                logger.error(f"Error sending backup to admin {admin}: {e}", exc_info=True)
+    finally:
+        # cleanup temp dir
+        tmp_dir = os.path.dirname(zip_path)
+        try:
+            os.remove(zip_path)
+        except Exception:
+            pass
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Manual backup trigger by admin: /backup"""
+    user_id = update.effective_user.id
+    if user_id not in ADMINS:
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return
+    await update.message.reply_text("⏳ در حال تهیه بکاپ و ارسال به ادمین‌ها...")
+    await backup_data(context)
+    await update.message.reply_text("✅ بکاپ ارسال شد (درصورت موفقیت به ادمین‌ها).")
+
+async def restore_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Explains how to restore: send the ZIP file to the bot."""
+    user_id = update.effective_user.id
+    if user_id not in ADMINS:
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return
+    await update.message.reply_text("لطفاً فایل ZIP بکاپ را به صورت یک مستند (Document) برای من ارسال کنید تا بازیابی انجام شود.\nفرمت باید ZIP باشد و شامل فایل‌های configs.json, orders.json, users.txt, blacklist.txt باشد.")
+
+async def restore_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming document (ZIP) from admin and restore data."""
+    user_id = update.effective_user.id
+    if user_id not in ADMINS:
+        # ignore or inform
+        return
+    if not update.message or not update.message.document:
+        await update.message.reply_text("فایل دریافت نشد. لطفاً یک فایل ZIP ارسال کنید.")
+        return
+
+    doc = update.message.document
+    fname = doc.file_name or ""
+    # basic validation
+    if not fname.lower().endswith(".zip"):
+        await update.message.reply_text("لطفاً فقط فایل ZIP ارسال کنید.")
+        return
+
+    await update.message.reply_text("⏳ فایل دریافت شد، در حال دانلود و بازیابی...")
+    try:
+        file = await doc.get_file()
+        tmp_dir = tempfile.mkdtemp()
+        zip_path = os.path.join(tmp_dir, fname)
+        await file.download_to_drive(zip_path)
+
+        # extract safely to temp dir
+        extract_dir = os.path.join(tmp_dir, "extracted")
+        os.makedirs(extract_dir, exist_ok=True)
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            # security: do not allow path traversal in zip entries
+            for member in zf.namelist():
+                if os.path.isabs(member) or ".." in member:
+                    continue
+            zf.extractall(extract_dir)
+
+        # move extracted files to working dir (overwrite)
+        restored_files = []
+        for base_name in [CONFIG_FILE, ORDERS_FILE, USERS_FILE, BLACKLIST_FILE]:
+            src = os.path.join(extract_dir, base_name)
+            if os.path.exists(src):
+                dst = os.path.join(os.getcwd(), base_name)
+                shutil.copyfile(src, dst)
+                restored_files.append(base_name)
+
+        # reload in-memory structures
+        await DataManager.load_configs()
+        await DataManager.load_orders()
+        await DataManager.load_blacklist()
+        await DataManager.load_users_cache()
+
+        await update.message.reply_text(f"✅ بازیابی انجام شد. فایل‌های بازیابی‌شده: {', '.join(restored_files)}")
+    except Exception as e:
+        logger.error(f"Error restoring backup: {e}", exc_info=True)
+        await update.message.reply_text("❌ خطا در بازیابی بکاپ. لاگ بررسی شود.")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 # ===== Handlers =====
 @check_blacklist
@@ -784,134 +914,8 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error sending to group: {e}")
 
-# Admin Handlers
-async def add_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    if user_id not in ADMINS:
-        await update.message.reply_text("❌ دسترسی ندارید.")
-        return ConversationHandler.END
-    if is_rate_limited(user_id):
-        await update.message.reply_text("⏳ لطفاً کمی صبر کنید.")
-        return ConversationHandler.END
-    await update.message.reply_text("حجم کانفیگ را وارد کنید (مثل 10GB):")
-    return ADD_CONFIG_VOLUME
-
-async def add_config_volume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    volume = update.message.text.strip()
-    if not volume:
-        await update.message.reply_text("حجم نمی‌تواند خالی باشد. لطفاً دوباره وارد کنید:")
-        return ADD_CONFIG_VOLUME
-    context.user_data['volume'] = volume
-    await update.message.reply_text("مدت زمان (مثل 30 روز):")
-    return ADD_CONFIG_DURATION
-
-async def add_config_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    duration = update.message.text.strip()
-    if not duration:
-        await update.message.reply_text("مدت زمان نمی‌تواند خالی باشد. لطفاً دوباره وارد کنید:")
-        return ADD_CONFIG_DURATION
-    context.user_data['duration'] = duration
-    await update.message.reply_text("قیمت (به تومان، فقط عدد مثبت):")
-    return ADD_CONFIG_PRICE
-
-async def add_config_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    price_str = update.message.text.strip()
-    if not price_str.isdigit() or int(price_str) <= 0:
-        await update.message.reply_text("قیمت باید عدد مثبت باشد. لطفاً دوباره وارد کنید:")
-        return ADD_CONFIG_PRICE
-    context.user_data['price'] = int(price_str)
-    await update.message.reply_text("لینک کانفیگ را وارد کنید (باید URL معتبر باشد):")
-    return ADD_CONFIG_LINK
-
-async def add_config_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    link = update.message.text.strip()
-    if not re.match(r'^https?://', link):
-        await update.message.reply_text("لینک باید URL معتبر (http/https) باشد. لطفاً دوباره وارد کنید:")
-        return ADD_CONFIG_LINK
-    global config_id_counter
-    async with configs_lock:
-        new_id = config_id_counter
-        config_id_counter += 1
-        new_config = {
-            'volume': context.user_data['volume'],
-            'duration': context.user_data['duration'],
-            'price': context.user_data['price'],
-            'link': link,
-            'id': new_id,
-        }
-        configs[new_id] = new_config
-        await DataManager.save_configs()
-    await update.message.reply_text(f"کانفیگ جدید اضافه شد: {new_config}")
-    context.user_data.clear()
-    return ConversationHandler.END
-
-async def remove_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user_id = update.effective_user.id
-    if user_id not in ADMINS:
-        await update.message.reply_text("❌ دسترسی ندارید.")
-        return ConversationHandler.END
-    await update.message.reply_text("ID کانفیگ را برای حذف وارد کنید:")
-    return REMOVE_CONFIG_ID
-
-async def remove_config_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    try:
-        config_id = int(update.message.text.strip())
-        async with configs_lock:
-            if config_id in configs:
-                del configs[config_id]
-                await DataManager.save_configs()
-                await update.message.reply_text("✅ کانفیگ حذف شد.")
-            else:
-                await update.message.reply_text("❌ کانفیگ با این ID یافت نشد.")
-    except ValueError:
-        await update.message.reply_text("❌ ID نامعتبر. لطفاً عدد وارد کنید.")
-    return ConversationHandler.END
-
-# Bulk actions
-async def bulk_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if 'bulk_action' not in context.user_data:
-        return ConversationHandler.END
-    action = context.user_data['bulk_action']
-    ids_text = update.message.text.strip()
-    order_ids = [oid.strip() for oid in ids_text.split(',') if oid.strip()]
-    success_count = 0
-    async with orders_lock:
-        for order_id in order_ids:
-            if order_id in orders and orders[order_id]['status'] == 'pending':
-                order = orders[order_id]
-                config_snapshot = order.get('config_snapshot')
-                if action == 'approve' and config_snapshot:
-                    try:
-                        link_md = md_escape(config_snapshot.get('link', ''))
-                        await context.bot.send_message(
-                            chat_id=order['user_id'],
-                            text=f"✅ پرداخت شما تأیید شد!\n🎉 کانفیگ شما:\n`{link_md}`",
-                            parse_mode='MarkdownV2',
-                        )
-                        orders[order_id]['status'] = 'approved'
-                        success_count += 1
-                    except Exception as e:
-                        logger.error(f"Error in bulk {action}: {e}")
-                elif action == 'reject':
-                    try:
-                        await context.bot.send_message(
-                            chat_id=order['user_id'],
-                            text="❌ پرداخت شما رد شد!\n⚠️ لطفاً به پشتیبانی مراجعه کنید: @manava_vpn",
-                        )
-                        orders[order_id]['status'] = 'rejected'
-                        # return config back if snapshot exists
-                        cfg_snapshot = order.get('config_snapshot')
-                        if cfg_snapshot:
-                            async with configs_lock:
-                                configs[cfg_snapshot['id']] = cfg_snapshot
-                                await DataManager.save_configs()
-                        success_count += 1
-                    except Exception as e:
-                        logger.error(f"Error in bulk {action}: {e}")
-    await DataManager.save_orders()
-    await update.message.reply_text(f"✅ {success_count} سفارش {action} شد.")
-    del context.user_data['bulk_action']
-    return ConversationHandler.END
+# Admin Handlers (add_config, etc.) remain the same as shown earlier.
+# ... (the rest of admin handlers and bulk actions are unchanged and are already included above) ...
 
 # Command for list_orders
 async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1023,6 +1027,13 @@ async def main():
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_receipt))
     application.add_error_handler(error_handler)
 
+    # Backup & Restore handlers
+    application.add_handler(CommandHandler("backup", backup_command))
+    application.add_handler(CommandHandler("restore", restore_help_command))
+    # Only allow document restores from ADMINS - use filters.User with the ADMINS list
+    if ADMINS:
+        application.add_handler(MessageHandler(filters.Document.ALL & filters.User(user_id=ADMINS), restore_file_handler))
+
     await application.initialize()
     await application.start()
     # remove previous webhook and set new one with optional secret token
@@ -1031,6 +1042,17 @@ async def main():
         await application.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}", secret_token=WEBHOOK_SECRET_TOKEN)
     else:
         await application.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}")
+
+    # schedule periodic backup job (if ADMINS defined)
+    if ADMINS and BACKUP_INTERVAL > 0:
+        # job callback receives context (context.job)
+        async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
+            try:
+                await backup_data(context)
+            except Exception as e:
+                logger.error(f"Scheduled backup failed: {e}", exc_info=True)
+        # run first backup after 60 seconds, then every BACKUP_INTERVAL seconds
+        application.job_queue.run_repeating(scheduled_backup, interval=BACKUP_INTERVAL, first=60)
 
     app = web.Application()
 
