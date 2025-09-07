@@ -207,7 +207,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         try:
             await query.edit_message_text(
-                f"لطفاً مبلغ {config['قیمت']} تومان به شماره کارت زیر واریز کنید:\n{CARD_NUMBER}\nنام: {CARD_NAME}\nID سفارش: {order_id}\nلطفاً عکس رسید پرداخت را اینجا ارسال کنید."
+                f"لطفاً مبلغ {config['قیمت']} تومان به شماره کارت زیر واریز کنید:\n`{CARD_NUMBER}`\nنام: {CARD_NAME}\nID سفارش: {order_id}\nلطفاً عکس رسید پرداخت را اینجا ارسال کنید.",
+                parse_mode='Markdown'
             )
             context.user_data['pending_order_id'] = order_id  # برای منتظر ماندن رسید
         except Exception as e:
@@ -243,12 +244,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # ویرایش پیام‌های ادمین
                 if 'admin_messages' in order:
                     for admin_id, message_id in order['admin_messages'].items():
+                        try:
+                            await context.bot.edit_message_text(
+                                chat_id=admin_id,
+                                message_id=message_id,
+                                text=f"✅ پرداخت تأیید شد:\n👤 کاربر: {order['user_id']}\n📋 سفارش: {order_id}",
+                                reply_markup=None
+                            )
+                        except Exception as edit_e:
+                            logger.error(f"خطا در ویرایش پیام ادمین {admin_id}: {edit_e}")
+                
+                # ویرایش پیام گروه اگر وجود داشته باشد
+                if 'group_message_id' in order and 'group_chat_id' in order:
+                    try:
                         await context.bot.edit_message_text(
-                            chat_id=admin_id,
-                            message_id=message_id,
-                            text=query.message.text + "\n✅ پرداخت تأیید شد.",
+                            chat_id=order['group_chat_id'],
+                            message_id=order['group_message_id'],
+                            text=f"✅ پرداخت تأیید شد:\n👤 کاربر: {order['user_id']}\n📋 سفارش: {order_id}",
                             reply_markup=None
                         )
+                    except Exception as group_edit_e:
+                        logger.error(f"خطا در ویرایش پیام گروه: {group_edit_e}")
                 
                 await query.edit_message_text(
                     text=f"✅ پرداخت تأیید شد:\n👤 کاربر: {order['user_id']}\n📋 سفارش: {order_id}",
@@ -284,12 +300,27 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # ویرایش پیام‌های ادمین
             if 'admin_messages' in order:
                 for admin_id, message_id in order['admin_messages'].items():
+                    try:
+                        await context.bot.edit_message_text(
+                            chat_id=admin_id,
+                            message_id=message_id,
+                            text=f"❌ پرداخت رد شد:\n👤 کاربر: {order['user_id']}\n📋 سفارش: {order_id}",
+                            reply_markup=None
+                        )
+                    except Exception as edit_e:
+                        logger.error(f"خطا در ویرایش پیام ادمین {admin_id}: {edit_e}")
+            
+            # ویرایش پیام گروه اگر وجود داشته باشد
+            if 'group_message_id' in order and 'group_chat_id' in order:
+                try:
                     await context.bot.edit_message_text(
-                        chat_id=admin_id,
-                        message_id=message_id,
-                        text=query.message.text + "\n❌ پرداخت رد شد.",
+                        chat_id=order['group_chat_id'],
+                        message_id=order['group_message_id'],
+                        text=f"❌ پرداخت رد شد:\n👤 کاربر: {order['user_id']}\n📋 سفارش: {order_id}",
                         reply_markup=None
                     )
+                except Exception as group_edit_e:
+                    logger.error(f"خطا در ویرایش پیام گروه: {group_edit_e}")
         except Exception as e:
             logger.error(f"خطا در ارسال پیام به کاربر: {e}")
         
@@ -356,19 +387,21 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     orders[order_id]['admin_messages'] = admin_messages
     save_orders()
+    
+    # ارسال به گروه
     try:
-         group_message = await context.bot.send_photo(
-             chat_id=ADMIN_GROUP_ID,
-             photo=photo_id,
-             caption=text,
-             reply_markup=admin_keyboard,
-             parse_mode='Markdown'
-         )
-         orders[order_id]['group_chat_id'] = group_message.chat_id
-         orders[order_id]['group_message_id'] = group_message.message_id
-         save_orders()
-     except Exception as e:
-         logger.error(f"خطا در ارسال به گروه: {e}")
+        group_message = await context.bot.send_photo(
+            chat_id=ADMIN_GROUP_ID,
+            photo=photo_id,
+            caption=text,
+            reply_markup=admin_keyboard,
+            parse_mode='Markdown'
+        )
+        orders[order_id]['group_chat_id'] = group_message.chat_id
+        orders[order_id]['group_message_id'] = group_message.message_id
+        save_orders()
+    except Exception as e:
+        logger.error(f"خطا در ارسال به گروه: {e}")
 
 # ===== هندلرهای ادمین =====
 async def add_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
