@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # تنظیمات
 TOKEN = os.getenv("TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-PORT = int(os.getenv("PORT", 10000))
+PORT = int(os.getenv("PORT", 8080)) 
 ADMIN_GROUP_ID_STR = os.getenv("ADMIN_GROUP_ID")
 ADMINS_STR = os.getenv("ADMINS")
 CARD_NUMBER = os.getenv("CARD_NUMBER")
