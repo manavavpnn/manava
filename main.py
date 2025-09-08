@@ -60,6 +60,7 @@ orders: Dict[str, Dict] = {}
 configs: Dict[int, Dict] = {}
 blacklist: Set[int] = set()
 config_id_counter = 1
+processed_updates: Set[int] = set()  # Added to track processed update_ids
 
 # Locks for concurrency
 orders_lock = asyncio.Lock()
@@ -935,14 +936,21 @@ async def add_config_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def add_config_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     global config_id_counter
-    async with configs_lock:
-        config = context.user_data.pop('new_config')
-        config['id'] = config_id_counter
-        config['link'] = update.message.text
-        configs[config['id']] = config
-        config_id_counter += 1
-        await DataManager.save_configs()
-    await update.message.reply_text("✅ کانفیگ اضافه شد.")
+    try:
+        # پاکسازی لینک از mentionهای اضافی
+        link = re.sub(r'--@ghalagyann2', '', update.message.text)
+        link = re.sub(r'----@Shh_Proxy', '', link).strip()
+        async with configs_lock:
+            config = context.user_data.pop('new_config')
+            config['id'] = config_id_counter
+            config['link'] = link
+            configs[config['id']] = config
+            config_id_counter += 1
+            await DataManager.save_configs()
+        await update.message.reply_text("✅ کانفیگ اضافه شد.")
+    except Exception as e:
+        logger.error(f"Error in add_config_link: {e}", exc_info=True)
+        await update.message.reply_text("❌ خطا در اضافه کردن کانفیگ. لطفاً دوباره تلاش کنید.")
     return ConversationHandler.END
 
 async def remove_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1044,11 +1052,16 @@ async def webhook_handler(request: web.Request):
             logger.warning(f"Invalid webhook secret token: {secret_token}")
             return web.Response(status=403)
         data = await request.json()
+        update_id = data.get('update_id')
+        if update_id in processed_updates:
+            logger.debug(f"Update {update_id} already processed, skipping")
+            return web.Response(status=200)
         logger.debug(f"Webhook data received: {data}")
         update = Update.de_json(data, app.bot)
         if update:
             logger.info(f"Processing update: {update.update_id}")
             await app.process_update(update)
+            processed_updates.add(update_id)
             logger.info(f"Update {update.update_id} processed successfully")
         else:
             logger.warning("No valid update object created from webhook data")
@@ -1155,7 +1168,7 @@ async def main():
     aiohttp_app = web.Application()
     aiohttp_app['telegram_app'] = application
     aiohttp_app.router.add_post('/', webhook_handler)
-    aiohttp_app.router.add_get('/ping', handle_ping)  # Added for UptimeRobot
+    aiohttp_app.router.add_get('/ping', handle_ping)
 
     async def setup_webhook():
         try:
