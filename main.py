@@ -10,7 +10,6 @@ from io import BytesIO, StringIO
 from datetime import datetime
 from typing import Dict, List, Optional, Set
 import aiofiles
-from aiohttp import web
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
@@ -29,11 +28,12 @@ import contextlib
 import zipfile
 import tempfile
 import shutil
+import httpx
 
 # تنظیمات لاگ‌گیری
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.DEBUG  # برای دیباگ بیشتر
 )
 logger = logging.getLogger(__name__)
 
@@ -1021,9 +1021,6 @@ async def bulk_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     await update.message.reply_text(f"✅ {success} سفارش با موفقیت {action} شدند.")
     return ConversationHandler.END
 
-async def handle_ping(request):
-    return web.Response(text="OK")
-
 async def error_handler(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Error: {context.error}", exc_info=True)
     try:
@@ -1052,7 +1049,13 @@ async def main():
     await DataManager.load_blacklist()
     await DataManager.load_configs()
 
-    application = Application.builder().token(TOKEN).persistence(PicklePersistence(filepath=PERSISTENCE_FILE)).build()
+    # تنظیم کلاینت httpx با retry
+    http_client = httpx.AsyncClient(
+        timeout=10.0,
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)
+    )
+
+    application = Application.builder().token(TOKEN).persistence(PicklePersistence(filepath=PERSISTENCE_FILE)).http_client(http_client).build()
 
     add_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("add_config", add_config)],
@@ -1098,36 +1101,51 @@ async def main():
         application.add_handler(MessageHandler(filters.Document.ALL & filters.User(user_id=ADMINS), restore_file_handler))
     application.add_error_handler(error_handler)
 
+    async def run_application():
+        try:
+            await application.initialize()
+            await application.start()
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("ربات در حالت Polling شروع به کار کرد.")
+            await application.run_polling(
+                drop_pending_updates=True,
+                close_loop=False,
+                stop_signals=(),
+                allowed_updates=["message", "callback_query"]
+            )
+        except Exception as e:
+            logger.error(f"Error running application: {e}", exc_info=True)
+        finally:
+            try:
+                if application.updater and application.updater.running:
+                    await application.updater.stop()
+                await application.stop()
+                await http_client.aclose()
+            except Exception as e:
+                logger.error(f"Error stopping application: {e}", exc_info=True)
+
     try:
-        await application.initialize()
-        await application.start()
-        await application.bot.delete_webhook(drop_pending_updates=True)
-        logger.info("ربات در حالت Polling شروع به کار کرد.")
-        # JobQueue غیرفعال شده تا مشکل حل بشه
-        # if ADMINS and BACKUP_INTERVAL > 0:
-        #     async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
-        #         try:
-        #             await backup_data(context)
-        #         except Exception as e:
-        #             logger.error(f"Scheduled backup failed: {e}", exc_info=True)
-        #     application.job_queue.run_repeating(scheduled_backup, interval=BACKUP_INTERVAL, first=60)
-        await application.run_polling(
-            drop_pending_updates=True,
-            close_loop=False,
-            stop_signals=()
-        )
-    except Exception as e:
-        logger.error(f"Error running application: {e}", exc_info=True)
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            logger.debug("Using existing event loop")
+            await run_application()
+        else:
+            logger.debug("Creating new event loop")
+            loop.run_until_complete(run_application())
+    except RuntimeError as e:
+        if "no running event loop" in str(e):
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(run_application())
+        else:
+            logger.error(f"Error in event loop management: {e}", exc_info=True)
+            raise
     finally:
         try:
-            if application.updater and application.updater.running:
-                await application.updater.stop()
-            await application.stop()
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
         except Exception as e:
-            logger.error(f"Error stopping application: {e}", exc_info=True)
+            logger.error(f"Error shutting down loop: {e}", exc_info=True)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        logger.error(f"Error in main loop: {e}", exc_info=True)
+    asyncio.run(main())
