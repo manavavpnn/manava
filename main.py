@@ -30,7 +30,14 @@ import zipfile
 import tempfile
 import shutil
 
-# ===== تنظیمات =====
+# تنظیمات لاگ‌گیری
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# تنظیمات
 TOKEN = os.getenv("TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 10000))
@@ -68,19 +75,12 @@ ORDERS_PER_PAGE = 5
 # Backup schedule (seconds). Default: 24h
 BACKUP_INTERVAL = int(os.getenv("BACKUP_INTERVAL_SECONDS", 24 * 3600))
 
-# ===== Logging =====
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# ===== Conversation States =====
+# Conversation States
 ADD_CONFIG_VOLUME, ADD_CONFIG_DURATION, ADD_CONFIG_PRICE, ADD_CONFIG_LINK = range(4)
 REMOVE_CONFIG_ID = 0
 BULK_APPROVE_IDS = 1
 
-# ===== Utilities =====
+# Utilities
 def md_escape(s: str) -> str:
     return escape_markdown(str(s), version=2)
 
@@ -117,7 +117,7 @@ def is_rate_limited(user_id: int, window: int = 5) -> bool:
                 rate_limiter.pop(k, None)
     return limited
 
-# ===== Data Manager Class =====
+# Data Manager Class
 class DataManager:
     @staticmethod
     async def check_env():
@@ -306,7 +306,7 @@ def check_blacklist(func):
         return await func(update, context)
     return wrapper
 
-# ===== Backup & Restore =====
+# Backup & Restore
 async def create_backup_zip(path_list: List[str]) -> str:
     tmp_dir = tempfile.mkdtemp()
     zip_path = os.path.join(tmp_dir, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
@@ -415,7 +415,7 @@ async def restore_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-# ===== Handlers =====
+# Handlers
 @check_blacklist
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -1103,6 +1103,14 @@ async def main():
         await application.start()
         await application.bot.delete_webhook(drop_pending_updates=True)
         logger.info("ربات در حالت Polling شروع به کار کرد.")
+        # JobQueue غیرفعال شده تا مشکل حل بشه
+        # if ADMINS and BACKUP_INTERVAL > 0:
+        #     async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
+        #         try:
+        #             await backup_data(context)
+        #         except Exception as e:
+        #             logger.error(f"Scheduled backup failed: {e}", exc_info=True)
+        #     application.job_queue.run_repeating(scheduled_backup, interval=BACKUP_INTERVAL, first=60)
         await application.run_polling(
             drop_pending_updates=True,
             close_loop=False,
@@ -1112,23 +1120,14 @@ async def main():
         logger.error(f"Error running application: {e}", exc_info=True)
     finally:
         try:
-            if application.updater.running:
+            if application.updater and application.updater.running:
                 await application.updater.stop()
             await application.stop()
         except Exception as e:
             logger.error(f"Error stopping application: {e}", exc_info=True)
 
 if __name__ == "__main__":
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(main())
+        asyncio.run(main())
     except Exception as e:
         logger.error(f"Error in main loop: {e}", exc_info=True)
-    finally:
-        try:
-            loop.run_until_complete(loop.shutdown_asyncgens())
-        except Exception as e:
-            logger.error(f"Error shutting down asyncgens: {e}", exc_info=True)
-        finally:
-            loop.close()
