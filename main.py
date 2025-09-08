@@ -105,13 +105,11 @@ def redact_card(num: Optional[str]) -> str:
         return "**** **** **** " + num[-4:]
     return "****"
 
-# Rate limit helper with cleanup
 def is_rate_limited(user_id: int, window: int = 5) -> bool:
     now = time.monotonic()
     last = rate_limiter.get(user_id, 0)
     limited = (now - last) < window
     rate_limiter[user_id] = now
-    # occasional cleanup
     if len(rate_limiter) > 10000:
         cutoff = now - 300  # 5 minutes
         for k, v in list(rate_limiter.items()):
@@ -189,7 +187,6 @@ class DataManager:
                 async with aiofiles.open(ORDERS_FILE, "r", encoding="utf-8") as f:
                     content = await f.read()
                 orders = json.loads(content)
-                # ensure timestamps
                 for order_id, order in orders.items():
                     if "timestamp" not in order:
                         orders[order_id]["timestamp"] = datetime.now().isoformat()
@@ -311,8 +308,6 @@ def check_blacklist(func):
 
 # ===== Backup & Restore =====
 async def create_backup_zip(path_list: List[str]) -> str:
-    """Create a temporary zip file containing existing files in path_list.
-    Returns path to the zip file."""
     tmp_dir = tempfile.mkdtemp()
     zip_path = os.path.join(tmp_dir, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
     try:
@@ -328,7 +323,6 @@ async def create_backup_zip(path_list: List[str]) -> str:
         raise
 
 async def backup_data(context: ContextTypes.DEFAULT_TYPE):
-    """Send a ZIP backup to all ADMINS. Used by manual command and scheduled job."""
     path_list = [CONFIG_FILE, ORDERS_FILE, USERS_FILE, BLACKLIST_FILE]
     try:
         zip_path = await create_backup_zip(path_list)
@@ -357,7 +351,6 @@ async def backup_data(context: ContextTypes.DEFAULT_TYPE):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Manual backup trigger by admin: /backup"""
     user_id = update.effective_user.id
     if user_id not in ADMINS:
         await update.message.reply_text("❌ دسترسی ندارید.")
@@ -367,7 +360,6 @@ async def backup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ بکاپ ارسال شد (درصورت موفقیت به ادمین‌ها).")
 
 async def restore_help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Explains how to restore: send the ZIP file to the bot."""
     user_id = update.effective_user.id
     if user_id not in ADMINS:
         await update.message.reply_text("❌ دسترسی ندارید.")
@@ -375,7 +367,6 @@ async def restore_help_command(update: Update, context: ContextTypes.DEFAULT_TYP
     await update.message.reply_text("لطفاً فایل ZIP بکاپ را به صورت یک مستند (Document) برای من ارسال کنید تا بازیابی انجام شود.\nفرمت باید ZIP باشد و شامل فایل‌های configs.json, orders.json, users.txt, blacklist.txt باشد.")
 
 async def restore_file_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle incoming document (ZIP) from admin and restore data."""
     user_id = update.effective_user.id
     if user_id not in ADMINS:
         return
@@ -920,19 +911,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     return ConversationHandler.END
 
-async def handle_ping(request):
-    return web.Response(text="OK")
-
-async def error_handler(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Error: {context.error}", exc_info=True)
-    try:
-        if update and getattr(update, "message", None):
-            await update.message.reply_text("خطایی رخ داد. لطفاً دوباره تلاش کنید.")
-        elif update and getattr(update, "callback_query", None):
-            await update.callback_query.answer("خطایی رخ داد.")
-    except Exception:
-        pass
-
 async def add_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     if user_id not in ADMINS:
@@ -1043,6 +1021,19 @@ async def bulk_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     await update.message.reply_text(f"✅ {success} سفارش با موفقیت {action} شدند.")
     return ConversationHandler.END
 
+async def handle_ping(request):
+    return web.Response(text="OK")
+
+async def error_handler(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE):
+    logger.error(f"Error: {context.error}", exc_info=True)
+    try:
+        if update and getattr(update, "message", None):
+            await update.message.reply_text("خطایی رخ داد. لطفاً دوباره تلاش کنید.")
+        elif update and getattr(update, "callback_query", None):
+            await update.callback_query.answer("خطایی رخ داد.")
+    except Exception:
+        pass
+
 async def main():
     global ADMINS, ADMIN_GROUP_ID
     try:
@@ -1100,63 +1091,17 @@ async def main():
     application.add_handler(CommandHandler("export_stats", export_stats))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_receipt))
-    application.add_error_handler(error_handler)
-
     application.add_handler(CommandHandler("backup", backup_command))
     application.add_handler(CommandHandler("restore", restore_help_command))
     if ADMINS:
         application.add_handler(MessageHandler(filters.Document.ALL & filters.User(user_id=ADMINS), restore_file_handler))
+    application.add_error_handler(error_handler)
 
     await application.initialize()
     await application.start()
     await application.bot.delete_webhook(drop_pending_updates=True)
-    if WEBHOOK_SECRET_TOKEN:
-        await application.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}", secret_token=WEBHOOK_SECRET_TOKEN)
-    else:
-        await application.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}")
-
-    if ADMINS and BACKUP_INTERVAL > 0:
-        async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
-            try:
-                await backup_data(context)
-            except Exception as e:
-                logger.error(f"Scheduled backup failed: {e}", exc_info=True)
-        application.job_queue.run_repeating(scheduled_backup, interval=BACKUP_INTERVAL, first=60)
-
-    app = web.Application()
-
-    async def webhook_handler(request):
-        if WEBHOOK_SECRET_TOKEN:
-            header = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
-            if header != WEBHOOK_SECRET_TOKEN:
-                logger.warning("Invalid secret token in webhook request")
-                return web.Response(status=403)
-        try:
-            data = await request.json()
-            update = Update.de_json(data, application.bot)
-            await application.process_update(update)
-            return web.Response(status=200)
-        except Exception as e:
-            logger.error(f"Webhook error: {e}", exc_info=True)
-            return web.Response(status=400)
-
-    app.router.add_post(f"/{TOKEN}", webhook_handler)
-    app.router.add_get("/ping", handle_ping)
-
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-
-    logger.info(f"ربات شروع به کار کرد. پورت: {PORT}")
-
-    try:
-        await asyncio.Future()
-    except KeyboardInterrupt:
-        logger.info("Shutdown requested...")
-    finally:
-        await application.stop()
-        await runner.cleanup()
+    logger.info("ربات در حالت Polling شروع به کار کرد.")
+    await application.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
