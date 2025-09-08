@@ -29,6 +29,7 @@ import zipfile
 import tempfile
 import shutil
 from aiohttp import web
+import httpx
 
 # تنظیمات لاگ‌گیری
 logging.basicConfig(
@@ -46,12 +47,12 @@ ADMINS_STR = os.getenv("ADMINS")
 CARD_NUMBER = os.getenv("CARD_NUMBER")
 CARD_NAME = os.getenv("CARD_NAME")
 WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "your-secret-token")
-
 CONFIG_FILE = "configs.json"
 USERS_FILE = "users.txt"
 ORDERS_FILE = "orders.json"
 BLACKLIST_FILE = "blacklist.txt"
 PERSISTENCE_FILE = "bot_data.pkl"
+BACKUP_INTERVAL = int(os.getenv("BACKUP_INTERVAL_SECONDS", 24 * 3600))
 
 # Global counters and caches
 users_cache: Set[int] = set()
@@ -71,9 +72,6 @@ rate_limiter: Dict[int, float] = {}
 
 # Pagination settings
 ORDERS_PER_PAGE = 5
-
-# Backup schedule (seconds). Default: 24h
-BACKUP_INTERVAL = int(os.getenv("BACKUP_INTERVAL_SECONDS", 24 * 3600))
 
 # Conversation States
 ADD_CONFIG_VOLUME, ADD_CONFIG_DURATION, ADD_CONFIG_PRICE, ADD_CONFIG_LINK = range(4)
@@ -1036,17 +1034,33 @@ async def webhook_handler(request: web.Request):
     app = request.app['telegram_app']
     try:
         secret_token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+        logger.debug(f"Received webhook request with secret token: {secret_token}")
         if secret_token != WEBHOOK_SECRET_TOKEN:
-            logger.warning("Invalid webhook secret token")
+            logger.warning(f"Invalid webhook secret token: {secret_token}")
             return web.Response(status=403)
         data = await request.json()
+        logger.debug(f"Webhook data received: {data}")
         update = Update.de_json(data, app.bot)
         if update:
+            logger.info(f"Processing update: {update.update_id}")
             await app.process_update(update)
+        else:
+            logger.warning("No valid update object created from webhook data")
         return web.Response(status=200)
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
         return web.Response(status=500)
+
+async def test_telegram_api():
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.get(f"https://api.telegram.org/bot{TOKEN}/getMe")
+            response.raise_for_status()
+            logger.info(f"Telegram API test successful: {response.json()}")
+            return True
+        except Exception as e:
+            logger.error(f"Telegram API test failed: {e}", exc_info=True)
+            return False
 
 async def main():
     global ADMINS, ADMIN_GROUP_ID
@@ -1061,12 +1075,18 @@ async def main():
         logger.error(f"Env error: {e}")
         return
 
+    # Test Telegram API connectivity
+    if not await test_telegram_api():
+        logger.error("Cannot connect to Telegram API. Exiting.")
+        return
+
     await DataManager.load_users_cache()
     await DataManager.load_orders()
     await DataManager.load_blacklist()
     await DataManager.load_configs()
 
-    application = Application.builder().token(TOKEN).persistence(PicklePersistence(filepath=PERSISTENCE_FILE)).build()
+    # Configure Application with increased timeout
+    application = Application.builder().token(TOKEN).persistence(PicklePersistence(filepath=PERSISTENCE_FILE)).http_timeout(30.0).build()
 
     add_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("add_config", add_config)],
@@ -1128,10 +1148,13 @@ async def main():
 
     async def setup_webhook():
         try:
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("Dropped any pending updates")
             await application.bot.set_webhook(
                 url=WEBHOOK_URL,
                 secret_token=WEBHOOK_SECRET_TOKEN,
-                allowed_updates=["message", "callback_query"]
+                allowed_updates=["message", "callback_query"],
+                timeout=30.0
             )
             logger.info(f"Webhook set to {WEBHOOK_URL}")
         except Exception as e:
