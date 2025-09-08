@@ -8,8 +8,9 @@ import csv
 import io
 from io import BytesIO, StringIO
 from datetime import datetime
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Any, Tuple
 import aiofiles
+from aiohttp import web
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
@@ -28,17 +29,10 @@ import contextlib
 import zipfile
 import tempfile
 import shutil
-from aiohttp import web
-import httpx
+from weakref import WeakValueDictionary
+import backoff
 
-# تنظیمات لاگ‌گیری
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG
-)
-logger = logging.getLogger(__name__)
-
-# تنظیمات
+# ===== تنظیمات =====
 TOKEN = os.getenv("TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 10000))
@@ -46,13 +40,13 @@ ADMIN_GROUP_ID_STR = os.getenv("ADMIN_GROUP_ID")
 ADMINS_STR = os.getenv("ADMINS")
 CARD_NUMBER = os.getenv("CARD_NUMBER")
 CARD_NAME = os.getenv("CARD_NAME")
-WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "your-secret-token")
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN")
+
 CONFIG_FILE = "configs.json"
 USERS_FILE = "users.txt"
 ORDERS_FILE = "orders.json"
 BLACKLIST_FILE = "blacklist.txt"
 PERSISTENCE_FILE = "bot_data.pkl"
-BACKUP_INTERVAL = int(os.getenv("BACKUP_INTERVAL_SECONDS", 24 * 3600))
 
 # Global counters and caches
 users_cache: Set[int] = set()
@@ -67,18 +61,28 @@ configs_lock = asyncio.Lock()
 users_lock = asyncio.Lock()
 blacklist_lock = asyncio.Lock()
 
-# Simple rate limiter
-rate_limiter: Dict[int, float] = {}
+# Rate limiter with expiration
+rate_limiter = WeakValueDictionary()
 
 # Pagination settings
 ORDERS_PER_PAGE = 5
 
-# Conversation States
+# Backup schedule (seconds). Default: 24h
+BACKUP_INTERVAL = int(os.getenv("BACKUP_INTERVAL_SECONDS", 24 * 3600))
+
+# ===== Logging =====
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s [user_id=%(user_id)s order_id=%(order_id)s]',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+# ===== Conversation States =====
 ADD_CONFIG_VOLUME, ADD_CONFIG_DURATION, ADD_CONFIG_PRICE, ADD_CONFIG_LINK = range(4)
 REMOVE_CONFIG_ID = 0
 BULK_APPROVE_IDS = 1
 
-# Utilities
+# ===== Utilities =====
 def md_escape(s: str) -> str:
     return escape_markdown(str(s), version=2)
 
@@ -90,6 +94,7 @@ def csv_safe(s: Optional[str]) -> str:
         return "'" + s
     return s
 
+@backoff.on_exception(backoff.expo, Exception, max_tries=3)
 async def atomic_write(path: str, data: str):
     tmp = f"{path}.tmp"
     async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
@@ -107,15 +112,15 @@ def is_rate_limited(user_id: int, window: int = 5) -> bool:
     now = time.monotonic()
     last = rate_limiter.get(user_id, 0)
     limited = (now - last) < window
-    rate_limiter[user_id] = now
-    if len(rate_limiter) > 10000:
-        cutoff = now - 300
-        for k, v in list(rate_limiter.items()):
-            if v < cutoff:
-                rate_limiter.pop(k, None)
+    if not limited:
+        rate_limiter[user_id] = now
     return limited
 
-# Data Manager Class
+def log_error_with_context(error: Exception, user_id: Optional[int] = None, order_id: Optional[str] = None):
+    extra = {'user_id': user_id or 'unknown', 'order_id': order_id or 'unknown'}
+    logger.error(f"Error: {error}", exc_info=True, extra=extra)
+
+# ===== Data Manager Class =====
 class DataManager:
     @staticmethod
     async def check_env():
@@ -143,6 +148,22 @@ class DataManager:
             raise ValueError(f"Missing env vars: {', '.join(missing)}")
 
     @staticmethod
+    async def init_data_files():
+        """Initialize data files if they don't exist"""
+        files_to_init = [
+            (CONFIG_FILE, "[]"),
+            (ORDERS_FILE, "{}"),
+            (USERS_FILE, ""),
+            (BLACKLIST_FILE, "")
+        ]
+        
+        for file_path, default_content in files_to_init:
+            if not os.path.exists(file_path):
+                async with aiofiles.open(file_path, "w", encoding="utf-8") as f:
+                    await f.write(default_content)
+                logger.info(f"Created missing data file: {file_path}")
+
+    @staticmethod
     async def save_user(user_id: int) -> int:
         global users_cache
         if not isinstance(user_id, int) or user_id <= 0:
@@ -157,18 +178,21 @@ class DataManager:
     @staticmethod
     async def load_configs():
         global configs, config_id_counter
-        if os.path.exists(CONFIG_FILE):
-            try:
-                async with aiofiles.open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                    content = await f.read()
-                loaded = json.loads(content)
-                configs = {int(cfg["id"]): cfg for cfg in loaded if "id" in cfg}
-                config_id_counter = (max(configs.keys()) + 1) if configs else 1
-            except Exception as e:
-                logger.error(f"Error loading configs: {e}")
+        await DataManager.init_data_files()
+        
+        try:
+            async with aiofiles.open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                content = await f.read()
+            if not content.strip():
                 configs = {}
                 config_id_counter = 1
-        else:
+                return
+                
+            loaded = json.loads(content)
+            configs = {int(cfg["id"]): cfg for cfg in loaded if "id" in cfg}
+            config_id_counter = (max(configs.keys()) + 1) if configs else 1
+        except Exception as e:
+            logger.error(f"Error loading configs: {e}")
             configs = {}
             config_id_counter = 1
 
@@ -180,18 +204,21 @@ class DataManager:
     @staticmethod
     async def load_orders():
         global orders
-        if os.path.exists(ORDERS_FILE):
-            try:
-                async with aiofiles.open(ORDERS_FILE, "r", encoding="utf-8") as f:
-                    content = await f.read()
-                orders = json.loads(content)
-                for order_id, order in orders.items():
-                    if "timestamp" not in order:
-                        orders[order_id]["timestamp"] = datetime.now().isoformat()
-            except Exception as e:
-                logger.error(f"Error loading orders: {e}")
+        await DataManager.init_data_files()
+        
+        try:
+            async with aiofiles.open(ORDERS_FILE, "r", encoding="utf-8") as f:
+                content = await f.read()
+            if not content.strip():
                 orders = {}
-        else:
+                return
+                
+            orders = json.loads(content)
+            for order_id, order in orders.items():
+                if "timestamp" not in order:
+                    orders[order_id]["timestamp"] = datetime.now().isoformat()
+        except Exception as e:
+            logger.error(f"Error loading orders: {e}")
             orders = {}
 
     @staticmethod
@@ -202,17 +229,16 @@ class DataManager:
     @staticmethod
     async def load_blacklist():
         global blacklist
-        if os.path.exists(BLACKLIST_FILE):
-            try:
-                async with aiofiles.open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
-                    content = await f.read()
-                lines = [line.strip() for line in content.splitlines() if line.strip()]
-                with contextlib.suppress(ValueError):
-                    blacklist = {int(line) for line in lines if line.isdigit()}
-            except Exception as e:
-                logger.error(f"Error loading blacklist: {e}")
-                blacklist = set()
-        else:
+        await DataManager.init_data_files()
+        
+        try:
+            async with aiofiles.open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
+                content = await f.read()
+            lines = [line.strip() for line in content.splitlines() if line.strip()]
+            with contextlib.suppress(ValueError):
+                blacklist = {int(line) for line in lines if line.isdigit()}
+        except Exception as e:
+            logger.error(f"Error loading blacklist: {e}")
             blacklist = set()
 
     @staticmethod
@@ -226,17 +252,16 @@ class DataManager:
     @staticmethod
     async def load_users_cache():
         global users_cache
-        if os.path.exists(USERS_FILE):
-            try:
-                async with aiofiles.open(USERS_FILE, "r", encoding="utf-8") as f:
-                    content = await f.read()
-                lines = [line.strip() for line in content.splitlines() if line.strip()]
-                with contextlib.suppress(ValueError):
-                    users_cache = {int(line) for line in lines if line.isdigit()}
-            except Exception as e:
-                logger.error(f"Error loading users_cache: {e}")
-                users_cache = set()
-        else:
+        await DataManager.init_data_files()
+        
+        try:
+            async with aiofiles.open(USERS_FILE, "r", encoding="utf-8") as f:
+                content = await f.read()
+            lines = [line.strip() for line in content.splitlines() if line.strip()]
+            with contextlib.suppress(ValueError):
+                users_cache = {int(line) for line in lines if line.isdigit()}
+        except Exception as e:
+            logger.error(f"Error loading users_cache: {e}")
             users_cache = set()
 
     @staticmethod
@@ -304,7 +329,7 @@ def check_blacklist(func):
         return await func(update, context)
     return wrapper
 
-# Backup & Restore
+# ===== Backup & Restore =====
 async def create_backup_zip(path_list: List[str]) -> str:
     tmp_dir = tempfile.mkdtemp()
     zip_path = os.path.join(tmp_dir, f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip")
@@ -339,7 +364,7 @@ async def backup_data(context: ContextTypes.DEFAULT_TYPE):
                         caption="📦 بکاپ داده‌ها — نگهدارید تا در زمان دیپلوی بعدی استفاده کنید."
                     )
             except Exception as e:
-                logger.error(f"Error sending backup to admin {admin}: {e}")
+                logger.error(f"Error sending backup to admin {admin}: {e}", exc_info=True)
     finally:
         tmp_dir = os.path.dirname(zip_path)
         try:
@@ -391,7 +416,7 @@ async def restore_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             for member in zf.namelist():
                 if os.path.isabs(member) or ".." in member:
                     continue
-                zf.extract(member, extract_dir)
+            zf.extractall(extract_dir)
 
         restored_files = []
         for base_name in [CONFIG_FILE, ORDERS_FILE, USERS_FILE, BLACKLIST_FILE]:
@@ -413,7 +438,7 @@ async def restore_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
-# Handlers
+# ===== Handlers =====
 @check_blacklist
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -423,7 +448,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await DataManager.save_user(user_id)
     keyboard = [
         [InlineKeyboardButton("💳 خرید کانفیگ", callback_data="buy")],
-        [InlineKeyboardButton("📞 تماس با پشتیبانی", callback_data="support")],
+        [InlineKeyboardButton("📞تماس با پشتیبانی", callback_data="support")],
     ]
     if user_id in ADMINS:
         keyboard.append([InlineKeyboardButton("🔧 پنل ادمین", callback_data="admin_panel")])
@@ -449,7 +474,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "buy":
         if not configs:
-            await query.edit_message_text("موجودی سرورها تمام شده، جهت ثبت سفارش به پشتیبانی مراجعه کنید.")
+            await query.edit_message_text("موجودی سرور ها تمام شده، جهت ثبت سفارش به پشتیبانی مراجعه کنید.")
             return
         grouped = DataManager.group_configs()
         keyboard = []
@@ -609,11 +634,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await query.edit_message_text("خطا در انتخاب کانفیگ.")
             return
+            
         async with configs_lock, orders_lock:
-            cfg = configs.pop(config_id, None)
+            cfg = configs.get(config_id)  # فقط خواندن، حذف نکردن
             if not cfg:
-                await query.edit_message_text("کانفیگ مورد نظر موجود نیست (ممکن است قبلاً خریداری شده باشد).")
+                await query.edit_message_text("کانفیگ مورد نظر موجود نیست.")
                 return
+                
             order_id = str(uuid.uuid4())
             orders[order_id] = {
                 'user_id': user_id,
@@ -621,10 +648,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'config_id': config_id,
                 'status': 'pending',
                 'timestamp': datetime.now().isoformat(),
-                'config_snapshot': cfg,
+                'config_snapshot': cfg.copy(),  # کپی گرفتن
             }
             await DataManager.save_orders()
-            await DataManager.save_configs()
 
         price_md = md_escape(str(cfg['price']))
         cn_md = md_escape(CARD_NUMBER) if CARD_NUMBER else md_escape(redact_card(CARD_NUMBER))
@@ -660,79 +686,92 @@ async def process_order_action(query, context, order_id: str, action: str):
         if order['status'] != 'pending':
             await query.answer("این سفارش قبلاً پردازش شده است!")
             return
+            
+        # وضعیت رو بلافاصله تغییر بدید تا از race condition جلوگیری شود
+        orders[order_id]['status'] = 'processing'
         config_snapshot = order.get('config_snapshot')
-        if action == "approve" and not config_snapshot:
-            await query.answer("کانفیگ یافت نشد!")
-            return
-        try:
-            user_id = order['user_id']
-            if action == "approve":
-                link_md = md_escape(config_snapshot.get('link', '')) if config_snapshot else md_escape("link_not_found")
-                oid_md = md_escape(order_id)
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        f"✅ پرداخت شما تأیید شد!\n🎉 کانفیگ شما:\n`{link_md}`\n\n"
-                        f"ID سفارش: `{oid_md}`\n💡 برای کپی ID، روی آن لمس کنید."
-                    ),
-                    parse_mode='MarkdownV2',
-                )
+        
+    try:
+        user_id = order['user_id']
+        if action == "approve":
+            if not config_snapshot:
+                await query.answer("کانفیگ یافت نشد!")
+                async with orders_lock:
+                    orders[order_id]['status'] = 'pending'  # بازگرداندن وضعیت
+                return
+                
+            # حذف کانفیگ فقط بعد از تأیید پرداخت
+            async with configs_lock:
+                if config_snapshot['id'] in configs:
+                    del configs[config_snapshot['id']]
+                    await DataManager.save_configs()
+            
+            link_md = md_escape(config_snapshot.get('link', ''))
+            oid_md = md_escape(order_id)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    f"✅ پرداخت شما تأیید شد!\\n🎉 کانفیگ شما:\\n`{link_md}`\\n\\n"
+                    f"ID سفارش: `{oid_md}`\\n💡 برای کپی ID، روی آن لمس کنید."
+                ),
+                parse_mode='MarkdownV2',
+            )
+            async with orders_lock:
                 orders[order_id]['status'] = 'approved'
-                status_text = "✅ پرداخت تأیید شد"
-            else:
-                oid_md = md_escape(order_id)
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=(
-                        "❌ پرداخت شما رد شد!\n⚠️ لطفاً به پشتیبانی مراجعه کنید: @manava_vpn\n\n"
-                        f"ID سفارش: `{oid_md}`\n💡 برای کپی ID، روی آن لمس کنید."
-                    ),
-                    parse_mode='MarkdownV2',
-                )
+            status_text = "✅ پرداخت تأیید شد"
+        else:
+            oid_md = md_escape(order_id)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "❌ پرداخت شما رد شد!\\n⚠️ لطفاً به پشتیبانی مراجعه کنید: @manava_vpn\\n\\n"
+                    f"ID سفارش: `{oid_md}`\\n💡 برای کپی ID، روی آن لمس کنید."
+                ),
+                parse_mode='MarkdownV2',
+            )
+            async with orders_lock:
                 orders[order_id]['status'] = 'rejected'
-                cfg_snapshot = order.get('config_snapshot')
-                if cfg_snapshot:
-                    async with configs_lock:
-                        configs[cfg_snapshot['id']] = cfg_snapshot
-                        await DataManager.save_configs()
-                status_text = "❌ پرداخت رد شد"
+            status_text = "❌ پرداخت رد شد"
 
-            await DataManager.save_orders()
+        await DataManager.save_orders()
 
-            oid_md2 = md_escape(order_id)
-            display_text = f"{status_text}:\n👤 کاربر: {order['user_id']}\n📋 ID سفارش: `{oid_md2}`\n"
-            admin_msgs = order.get('admin_messages', {})
-            for admin_id, msg_id in admin_msgs.items():
-                with contextlib.suppress(Exception):
-                    await context.bot.edit_message_caption(
-                        chat_id=admin_id,
-                        message_id=msg_id,
-                        caption=display_text,
-                        reply_markup=None,
-                        parse_mode='MarkdownV2'
-                    )
-            gid = order.get('group_chat_id')
-            mid = order.get('group_message_id')
-            if gid and mid:
-                with contextlib.suppress(Exception):
-                    await context.bot.edit_message_caption(
-                        chat_id=gid,
-                        message_id=mid,
-                        caption=display_text,
-                        reply_markup=None,
-                        parse_mode='MarkdownV2'
-                    )
-
+        oid_md2 = md_escape(order_id)
+        display_text = f"{status_text}:\\n👤 کاربر: {order['user_id']}\\n📋 ID سفارش: `{oid_md2}`\\n"
+        admin_msgs = order.get('admin_messages', {})
+        for admin_id, msg_id in admin_msgs.items():
             with contextlib.suppress(Exception):
-                await query.edit_message_text(
-                    text=display_text,
+                await context.bot.edit_message_caption(
+                    chat_id=admin_id,
+                    message_id=msg_id,
+                    caption=display_text,
+                    reply_markup=None,
+                    parse_mode='MarkdownV2'
+                )
+        gid = order.get('group_chat_id')
+        mid = order.get('group_message_id')
+        if gid and mid:
+            with contextlib.suppress(Exception):
+                await context.bot.edit_message_caption(
+                    chat_id=gid,
+                    message_id=mid,
+                    caption=display_text,
                     reply_markup=None,
                     parse_mode='MarkdownV2'
                 )
 
-        except Exception as e:
-            logger.error(f"Error in {action}: {e}", exc_info=True)
-            await query.answer("خطا در پردازش!")
+        with contextlib.suppress(Exception):
+            await query.edit_message_text(
+                text=display_text,
+                reply_markup=None,
+                parse_mode='MarkdownV2'
+            )
+
+    except Exception as e:
+        log_error_with_context(e, user_id=query.from_user.id, order_id=order_id)
+        await query.answer("خطا در پردازش!")
+        # بازگرداندن وضعیت در صورت خطا
+        async with orders_lock:
+            orders[order_id]['status'] = 'pending'
 
 async def show_orders_page(target, context, page: int):
     async with orders_lock:
@@ -749,7 +788,7 @@ async def show_orders_page(target, context, page: int):
     if total == 0:
         text = "هیچ سفارش در انتظاری وجود ندارد."
     else:
-        text = f"📋 سفارش‌های در انتظار (صفحه {page}/{total_pages}):\n\n"
+        text = f"📋 سفارش‌های در انتظار (صفحه {page}/{total_pages}):\\n\\n"
 
     keyboard_rows = []
 
@@ -759,10 +798,10 @@ async def show_orders_page(target, context, page: int):
         config_info = f"{cfg['volume']} - {cfg['duration']}" if cfg else "نامشخص (حذف شده)"
         username = o.get('username') or "—"
         text += (
-            f"🆔 ID سفارش: {oid}\n"
-            f"👤 کاربر: {o.get('user_id')} (@{username if username else '—'})\n"
-            f"⚙️ کانفیگ: {config_info}\n"
-            f"⏰ زمان: {o.get('timestamp', 'نامشخص')}\n\n"
+            f"🆔 ID سفارش: {oid}\\n"
+            f"👤 کاربر: {o.get('user_id')} (@{username if username else '—'})\\n"
+            f"⚙️ کانفیگ: {config_info}\\n"
+            f"⏰ زمان: {o.get('timestamp', 'نامشخص')}\\n\\n"
         )
         keyboard_rows.append([
             InlineKeyboardButton("✅ تأیید", callback_data=f"order_approve_{oid}"),
@@ -989,78 +1028,65 @@ async def bulk_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     for order_id in order_ids:
         async with orders_lock:
             if order_id in orders and orders[order_id]['status'] == 'pending':
-                orders[order_id]['status'] = action
-                if action == 'reject':
-                    cfg_snapshot = orders[order_id].get('config_snapshot')
-                    if cfg_snapshot:
-                        async with configs_lock:
-                            configs[cfg_snapshot['id']] = cfg_snapshot
-                success += 1
-        if action == 'approve':
-            user_id = orders[order_id]['user_id']
-            cfg = orders[order_id].get('config_snapshot', {})
-            link_md = md_escape(cfg.get('link', ''))
-            oid_md = md_escape(order_id)
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"✅ پرداخت شما تأیید شد!\n🎉 کانفیگ شما:\n`{link_md}`\nID سفارش: `{oid_md}`",
-                parse_mode='MarkdownV2',
-            )
-        else:
-            oid_md = md_escape(order_id)
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"❌ پرداخت شما رد شد!\n⚠️ لطفاً به پشتیبانی مراجعه کنید: @manava_vpn\nID سفارش: `{oid_md}`",
-                parse_mode='MarkdownV2',
-            )
+                orders[order_id]['status'] = 'processing'  # وضعیت موقت
+                
+        try:
+            if action == 'approve':
+                cfg_snapshot = orders[order_id].get('config_snapshot')
+                if cfg_snapshot:
+                    async with configs_lock:
+                        if cfg_snapshot['id'] in configs:
+                            del configs[cfg_snapshot['id']]
+                
+                user_id = orders[order_id]['user_id']
+                cfg = orders[order_id].get('config_snapshot', {})
+                link_md = md_escape(cfg.get('link', ''))
+                oid_md = md_escape(order_id)
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"✅ پرداخت شما تأیید شد!\\n🎉 کانفیگ شما:\\n`{link_md}`\\nID سفارش: `{oid_md}`",
+                    parse_mode='MarkdownV2',
+                )
+                async with orders_lock:
+                    orders[order_id]['status'] = 'approved'
+            else:
+                user_id = orders[order_id]['user_id']
+                oid_md = md_escape(order_id)
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=f"❌ پرداخت شما رد شد!\\n⚠️ لطفاً به پشتیبانی مراجعه کنید: @manava_vpn\\nID سفارش: `{oid_md}`",
+                    parse_mode='MarkdownV2',
+                )
+                async with orders_lock:
+                    orders[order_id]['status'] = 'rejected'
+                    
+            success += 1
+            
+        except Exception as e:
+            log_error_with_context(e, user_id=user_id, order_id=order_id)
+            async with orders_lock:
+                orders[order_id]['status'] = 'pending'  # بازگرداندن وضعیت در صورت خطا
+    
     await DataManager.save_orders()
-    if action == 'reject':
+    if action == 'approve':
         await DataManager.save_configs()
     await update.message.reply_text(f"✅ {success} سفارش با موفقیت {action} شدند.")
     return ConversationHandler.END
 
+async def handle_ping(request):
+    return web.Response(text="OK")
+
 async def error_handler(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE):
-    logger.error(f"Error: {context.error}", exc_info=True)
+    user_id = update.effective_user.id if update and update.effective_user else None
+    log_error_with_context(context.error, user_id=user_id)
+    
     try:
         if update and getattr(update, "message", None):
             await update.message.reply_text("خطایی رخ داد. لطفاً دوباره تلاش کنید.")
         elif update and getattr(update, "callback_query", None):
             await update.callback_query.answer("خطایی رخ داد.")
-    except Exception:
-        pass
-
-# Webhook handler for aiohttp
-async def webhook_handler(request: web.Request):
-    app = request.app['telegram_app']
-    try:
-        secret_token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
-        logger.debug(f"Received webhook request with secret token: {secret_token}")
-        if secret_token != WEBHOOK_SECRET_TOKEN:
-            logger.warning(f"Invalid webhook secret token: {secret_token}")
-            return web.Response(status=403)
-        data = await request.json()
-        logger.debug(f"Webhook data received: {data}")
-        update = Update.de_json(data, app.bot)
-        if update:
-            logger.info(f"Processing update: {update.update_id}")
-            await app.process_update(update)
-        else:
-            logger.warning("No valid update object created from webhook data")
-        return web.Response(status=200)
     except Exception as e:
-        logger.error(f"Webhook error: {e}", exc_info=True)
-        return web.Response(status=500)
-
-async def test_telegram_api():
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            response = await client.get(f"https://api.telegram.org/bot{TOKEN}/getMe")
-            response.raise_for_status()
-            logger.info(f"Telegram API test successful: {response.json()}")
-            return True
-        except Exception as e:
-            logger.error(f"Telegram API test failed: {e}", exc_info=True)
-            return False
+        log_error_with_context(e, user_id=user_id)
 
 async def main():
     global ADMINS, ADMIN_GROUP_ID
@@ -1075,18 +1101,13 @@ async def main():
         logger.error(f"Env error: {e}")
         return
 
-    # Test Telegram API connectivity
-    if not await test_telegram_api():
-        logger.error("Cannot connect to Telegram API. Exiting.")
-        return
-
+    await DataManager.init_data_files()
     await DataManager.load_users_cache()
     await DataManager.load_orders()
     await DataManager.load_blacklist()
     await DataManager.load_configs()
 
-    # Configure Application with pool_timeout
-    application = Application.builder().token(TOKEN).persistence(PicklePersistence(filepath=PERSISTENCE_FILE)).pool_timeout(30.0).build()
+    application = Application.builder().token(TOKEN).persistence(PicklePersistence(filepath=PERSISTENCE_FILE)).build()
 
     add_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("add_config", add_config)],
@@ -1132,75 +1153,37 @@ async def main():
         application.add_handler(MessageHandler(filters.Document.ALL & filters.User(user_id=ADMINS), restore_file_handler))
     application.add_error_handler(error_handler)
 
-    # تنظیم JobQueue برای بکاپ
-    if ADMINS and BACKUP_INTERVAL > 0:
-        async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
-            try:
-                await backup_data(context)
-            except Exception as e:
-                logger.error(f"Scheduled backup failed: {e}", exc_info=True)
-        application.job_queue.run_repeating(scheduled_backup, interval=BACKUP_INTERVAL, first=60)
-
-    # راه‌اندازی سرور Webhook
-    aiohttp_app = web.Application()
-    aiohttp_app['telegram_app'] = application
-    aiohttp_app.router.add_post('/', webhook_handler)
-
-    async def setup_webhook():
+    try:
+        await application.initialize()
+        await application.start()
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("ربات در حالت Polling شروع به کار کرد.")
+        await application.run_polling(
+            drop_pending_updates=True,
+            close_loop=False,
+            stop_signals=()
+        )
+    except Exception as e:
+        logger.error(f"Error running application: {e}", exc_info=True)
+    finally:
         try:
-            await application.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("Dropped any pending updates")
-            await application.bot.set_webhook(
-                url=WEBHOOK_URL,
-                secret_token=WEBHOOK_SECRET_TOKEN,
-                allowed_updates=["message", "callback_query"],
-            )
-            logger.info(f"Webhook set to {WEBHOOK_URL}")
-        except Exception as e:
-            logger.error(f"Failed to set webhook: {e}", exc_info=True)
-            raise
-
-    async def start_application():
-        try:
-            await application.initialize()
-            await application.start()
-            await setup_webhook()
-            logger.info("Application started with Webhook")
-        except Exception as e:
-            logger.error(f"Error starting application: {e}", exc_info=True)
-            raise
-
-    async def stop_application():
-        try:
-            if application.updater and application.updater.running:
+            if application.updater.running:
                 await application.updater.stop()
             await application.stop()
-            await application.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("Application stopped")
         except Exception as e:
             logger.error(f"Error stopping application: {e}", exc_info=True)
 
+if __name__ == "__main__":
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        # راه‌اندازی سرور aiohttp
-        runner = web.AppRunner(aiohttp_app)
-        await runner.setup()
-        site = web.TCPSite(runner, '0.0.0.0', PORT)
-        await start_application()
-        await site.start()
-        logger.info(f"Webhook server running on port {PORT}")
-
-        # نگه داشتن برنامه در حال اجرا
-        while True:
-            await asyncio.sleep(3600)
+        loop.run_until_complete(main())
     except Exception as e:
         logger.error(f"Error in main loop: {e}", exc_info=True)
-        raise
     finally:
-        await stop_application()
-        await runner.cleanup()
-
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        logger.error(f"Main error: {e}", exc_info=True)
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception as e:
+            logger.error(f"Error shutting down asyncgens: {e}", exc_info=True)
+        finally:
+            loop.close()
