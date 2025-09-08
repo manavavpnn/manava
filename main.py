@@ -29,6 +29,7 @@ import zipfile
 import tempfile
 import shutil
 from aiohttp import web
+import httpx
 
 # تنظیمات لاگ‌گیری
 logging.basicConfig(
@@ -45,13 +46,13 @@ ADMIN_GROUP_ID_STR = os.getenv("ADMIN_GROUP_ID")
 ADMINS_STR = os.getenv("ADMINS")
 CARD_NUMBER = os.getenv("CARD_NUMBER")
 CARD_NAME = os.getenv("CARD_NAME")
-WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN")  # حذف پیش‌فرض برای امنیت بیشتر
-
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "your-secret-token")
 CONFIG_FILE = "configs.json"
 USERS_FILE = "users.txt"
 ORDERS_FILE = "orders.json"
 BLACKLIST_FILE = "blacklist.txt"
 PERSISTENCE_FILE = "bot_data.pkl"
+BACKUP_INTERVAL = int(os.getenv("BACKUP_INTERVAL_SECONDS", 24 * 3600))
 
 # Global counters and caches
 users_cache: Set[int] = set()
@@ -72,13 +73,10 @@ rate_limiter: Dict[int, float] = {}
 # Pagination settings
 ORDERS_PER_PAGE = 5
 
-# Backup schedule (seconds). Default: 24h
-BACKUP_INTERVAL = int(os.getenv("BACKUP_INTERVAL_SECONDS", 24 * 3600))
-
 # Conversation States
 ADD_CONFIG_VOLUME, ADD_CONFIG_DURATION, ADD_CONFIG_PRICE, ADD_CONFIG_LINK = range(4)
 REMOVE_CONFIG_ID = 0
-BULK_ACTION_IDS = 1
+BULK_APPROVE_IDS = 1
 
 # Utilities
 def md_escape(s: str) -> str:
@@ -141,8 +139,6 @@ class DataManager:
             missing.append("CARD_NUMBER")
         if not CARD_NAME:
             missing.append("CARD_NAME")
-        if not WEBHOOK_SECRET_TOKEN:
-            missing.append("WEBHOOK_SECRET_TOKEN")
         if missing:
             raise ValueError(f"Missing env vars: {', '.join(missing)}")
 
@@ -601,7 +597,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         action = "approve" if data == "bulk_approve" else "reject"
         await query.edit_message_text(f"IDهای سفارش برای {action} گروهی را وارد کنید (با کاما جدا):")
         context.user_data['bulk_action'] = action
-        return BULK_ACTION_IDS
+        return BULK_APPROVE_IDS
 
     elif data == "admin_close":
         await query.edit_message_text("پنل ادمین بسته شد.")
@@ -631,7 +627,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await DataManager.save_configs()
 
         price_md = md_escape(str(cfg['price']))
-        cn_md = md_escape(redact_card(CARD_NUMBER))  # همیشه redact استفاده شود برای امنیت
+        cn_md = md_escape(CARD_NUMBER) if CARD_NUMBER else md_escape(redact_card(CARD_NUMBER))
         nm_safe = md_escape(CARD_NAME or "")
         oid_md = md_escape(order_id)
         text = (
@@ -922,45 +918,31 @@ async def add_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ADD_CONFIG_VOLUME
 
 async def add_config_volume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    volume = update.message.text.strip()
-    if not re.match(r'^\d+(GB|TB)?$', volume):  # ولیدیشن ساده برای حجم
-        await update.message.reply_text("حجم نامعتبر است. مثلاً 10GB یا 20TB وارد کنید.")
-        return ADD_CONFIG_VOLUME
-    context.user_data['new_config'] = {'volume': volume}
+    context.user_data['new_config'] = {'volume': update.message.text}
     await update.message.reply_text("مدت زمان (مثل 30 روز) را وارد کنید:")
     return ADD_CONFIG_DURATION
 
 async def add_config_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    duration = update.message.text.strip()
-    if not re.match(r'^\d+ (روز|ماه)$', duration):  # ولیدیشن ساده برای مدت زمان
-        await update.message.reply_text("مدت زمان نامعتبر است. مثلاً 30 روز یا 3 ماه وارد کنید.")
-        return ADD_CONFIG_DURATION
-    context.user_data['new_config']['duration'] = duration
+    context.user_data['new_config']['duration'] = update.message.text
     await update.message.reply_text("قیمت (به تومان) را وارد کنید:")
     return ADD_CONFIG_PRICE
 
 async def add_config_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        price = int(update.message.text.strip())
-        if price <= 0:
-            raise ValueError
+        price = int(update.message.text)
         context.user_data['new_config']['price'] = price
         await update.message.reply_text("لینک کانفیگ را وارد کنید:")
         return ADD_CONFIG_LINK
     except ValueError:
-        await update.message.reply_text("لطفاً یک عدد مثبت معتبر برای قیمت وارد کنید:")
+        await update.message.reply_text("لطفاً یک عدد معتبر برای قیمت وارد کنید:")
         return ADD_CONFIG_PRICE
 
 async def add_config_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    link = update.message.text.strip()
-    if not link.startswith("vless://") and not link.startswith("vmess://"):  # ولیدیشن ساده برای لینک VPN
-        await update.message.reply_text("لینک کانفیگ نامعتبر است. باید با vless:// یا vmess:// شروع شود.")
-        return ADD_CONFIG_LINK
     global config_id_counter
     async with configs_lock:
         config = context.user_data.pop('new_config')
         config['id'] = config_id_counter
-        config['link'] = link
+        config['link'] = update.message.text
         configs[config['id']] = config
         config_id_counter += 1
         await DataManager.save_configs()
@@ -977,7 +959,7 @@ async def remove_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
 async def remove_config_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     try:
-        config_id = int(update.message.text.strip())
+        config_id = int(update.message.text)
         async with configs_lock:
             if config_id in configs:
                 del configs[config_id]
@@ -1007,29 +989,30 @@ async def bulk_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     for order_id in order_ids:
         async with orders_lock:
             if order_id in orders and orders[order_id]['status'] == 'pending':
-                orders[order_id]['status'] = 'approved' if action == 'approve' else 'rejected'
+                orders[order_id]['status'] = action
                 if action == 'reject':
                     cfg_snapshot = orders[order_id].get('config_snapshot')
                     if cfg_snapshot:
                         async with configs_lock:
                             configs[cfg_snapshot['id']] = cfg_snapshot
                 success += 1
-                user_id_order = orders[order_id]['user_id']
-                cfg = orders[order_id].get('config_snapshot', {})
-                link_md = md_escape(cfg.get('link', ''))
-                oid_md = md_escape(order_id)
-                if action == 'approve':
-                    await context.bot.send_message(
-                        chat_id=user_id_order,
-                        text=f"✅ پرداخت شما تأیید شد!\n🎉 کانفیگ شما:\n`{link_md}`\nID سفارش: `{oid_md}`",
-                        parse_mode='MarkdownV2',
-                    )
-                else:
-                    await context.bot.send_message(
-                        chat_id=user_id_order,
-                        text=f"❌ پرداخت شما رد شد!\n⚠️ لطفاً به پشتیبانی مراجعه کنید: @manava_vpn\nID سفارش: `{oid_md}`",
-                        parse_mode='MarkdownV2',
-                    )
+        if action == 'approve':
+            user_id = orders[order_id]['user_id']
+            cfg = orders[order_id].get('config_snapshot', {})
+            link_md = md_escape(cfg.get('link', ''))
+            oid_md = md_escape(order_id)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"✅ پرداخت شما تأیید شد!\n🎉 کانفیگ شما:\n`{link_md}`\nID سفارش: `{oid_md}`",
+                parse_mode='MarkdownV2',
+            )
+        else:
+            oid_md = md_escape(order_id)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"❌ پرداخت شما رد شد!\n⚠️ لطفاً به پشتیبانی مراجعه کنید: @manava_vpn\nID سفارش: `{oid_md}`",
+                parse_mode='MarkdownV2',
+            )
     await DataManager.save_orders()
     if action == 'reject':
         await DataManager.save_configs()
@@ -1051,24 +1034,40 @@ async def webhook_handler(request: web.Request):
     app = request.app['telegram_app']
     try:
         secret_token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+        logger.debug(f"Received webhook request with secret token: {secret_token}")
         if secret_token != WEBHOOK_SECRET_TOKEN:
-            logger.warning("Invalid webhook secret token")
+            logger.warning(f"Invalid webhook secret token: {secret_token}")
             return web.Response(status=403)
         data = await request.json()
+        logger.debug(f"Webhook data received: {data}")
         update = Update.de_json(data, app.bot)
         if update:
+            logger.info(f"Processing update: {update.update_id}")
             await app.process_update(update)
+        else:
+            logger.warning("No valid update object created from webhook data")
         return web.Response(status=200)
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
         return web.Response(status=500)
+
+async def test_telegram_api():
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        try:
+            response = await client.get(f"https://api.telegram.org/bot{TOKEN}/getMe")
+            response.raise_for_status()
+            logger.info(f"Telegram API test successful: {response.json()}")
+            return True
+        except Exception as e:
+            logger.error(f"Telegram API test failed: {e}", exc_info=True)
+            return False
 
 async def main():
     global ADMINS, ADMIN_GROUP_ID
     try:
         await DataManager.check_env()
         ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_STR)
-        ADMINS = [int(x.strip()) for x in ADMINS_STR.split(',') if x.strip().isdigit()]
+        ADMINS = [int(x.strip()) for x in (ADMINS_STR.split(',') if ADMINS_STR else []) if x.strip().isdigit()]
         if not ADMINS:
             logger.error("No valid admin IDs provided in ADMINS env variable")
             raise ValueError("ADMINS is empty or invalid")
@@ -1076,12 +1075,18 @@ async def main():
         logger.error(f"Env error: {e}")
         return
 
+    # Test Telegram API connectivity
+    if not await test_telegram_api():
+        logger.error("Cannot connect to Telegram API. Exiting.")
+        return
+
     await DataManager.load_users_cache()
     await DataManager.load_orders()
     await DataManager.load_blacklist()
     await DataManager.load_configs()
 
-    application = Application.builder().token(TOKEN).persistence(PicklePersistence(filepath=PERSISTENCE_FILE)).build()
+    # Configure Application with pool_timeout
+    application = Application.builder().token(TOKEN).persistence(PicklePersistence(filepath=PERSISTENCE_FILE)).pool_timeout(30.0).build()
 
     add_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("add_config", add_config)],
@@ -1105,7 +1110,7 @@ async def main():
     bulk_conv_handler = ConversationHandler(
         entry_points=[CallbackQueryHandler(button_handler, pattern="^(bulk_approve|bulk_reject)$")],
         states={
-            BULK_ACTION_IDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, bulk_action)],
+            BULK_APPROVE_IDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, bulk_action)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_message=False,
@@ -1143,10 +1148,12 @@ async def main():
 
     async def setup_webhook():
         try:
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("Dropped any pending updates")
             await application.bot.set_webhook(
                 url=WEBHOOK_URL,
                 secret_token=WEBHOOK_SECRET_TOKEN,
-                allowed_updates=["message", "callback_query"]
+                allowed_updates=["message", "callback_query"],
             )
             logger.info(f"Webhook set to {WEBHOOK_URL}")
         except Exception as e:
@@ -1165,6 +1172,8 @@ async def main():
 
     async def stop_application():
         try:
+            if application.updater and application.updater.running:
+                await application.updater.stop()
             await application.stop()
             await application.bot.delete_webhook(drop_pending_updates=True)
             logger.info("Application stopped")
