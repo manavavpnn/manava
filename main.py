@@ -207,8 +207,7 @@ class DataManager:
                 async with aiofiles.open(BLACKLIST_FILE, "r", encoding="utf-8") as f:
                     content = await f.read()
                 lines = [line.strip() for line in content.splitlines() if line.strip()]
-                with contextlib.suppress(ValueError):
-                    blacklist = {int(line) for line in lines if line.isdigit()}
+                blacklist = {int(line) for line in lines if line.isdigit()}
             except Exception as e:
                 logger.error(f"Error loading blacklist: {e}")
                 blacklist = set()
@@ -231,8 +230,7 @@ class DataManager:
                 async with aiofiles.open(USERS_FILE, "r", encoding="utf-8") as f:
                     content = await f.read()
                 lines = [line.strip() for line in content.splitlines() if line.strip()]
-                with contextlib.suppress(ValueError):
-                    users_cache = {int(line) for line in lines if line.isdigit()}
+                users_cache = {int(line) for line in lines if line.isdigit()}
             except Exception as e:
                 logger.error(f"Error loading users_cache: {e}")
                 users_cache = set()
@@ -455,7 +453,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = []
         for key, cfgs in grouped.items():
             if cfgs:
-                keyboard.append([InlineKeyboardButton(f"{key} (موجود: {len(cfgs)})", callback_data=f"buy_group_{md_escape(key)}")])
+                keyboard.append([InlineKeyboardButton(f"{key} (موجود: {len(cfgs)})", callback_data=f"buy_group_{key}")])
         keyboard.append([InlineKeyboardButton("لغو", callback_data="cancel")])
         await query.edit_message_text("لطفاً یک گروه کانفیگ انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -463,13 +461,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         key = data[len("buy_group_"):]
         grouped = DataManager.group_configs()
         cfgs = grouped.get(key, [])
-        if not cfgs:
-            matched = []
-            for k, v in grouped.items():
-                if k.startswith(key) or key.startswith(md_escape(k)):
-                    matched = v
-                    break
-            cfgs = matched
         if not cfgs:
             await query.edit_message_text("کانفیگ یافت نشد.")
             return
@@ -531,17 +522,21 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id not in ADMINS:
             await query.answer("❌ دسترسی ندارید.")
             return
-        await query.edit_message_text("برای اضافه کانفیگ، از دستور /add_config استفاده کنید.")
         keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel")]]
-        await query.edit_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            "برای اضافه کانفیگ، از دستور /add_config استفاده کنید.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
     elif data == "admin_remove_config":
         if user_id not in ADMINS:
             await query.answer("❌ دسترسی ندارید.")
             return
-        await query.edit_message_text("برای حذف کانفیگ، از دستور /remove_config استفاده کنید.")
         keyboard = [[InlineKeyboardButton("🔙 بازگشت", callback_data="admin_panel")]]
-        await query.edit_reply_markup(reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            "برای حذف کانفیگ، از دستور /remove_config استفاده کنید.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
     elif data == "admin_export":
         if user_id not in ADMINS:
@@ -986,36 +981,45 @@ async def bulk_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         await update.message.reply_text("هیچ ID سفارشی وارد نشده است.")
         return ConversationHandler.END
     success = 0
+    to_notify = []
     for order_id in order_ids:
         async with orders_lock:
             if order_id in orders and orders[order_id]['status'] == 'pending':
+                order = orders[order_id]
                 orders[order_id]['status'] = action
                 if action == 'reject':
-                    cfg_snapshot = orders[order_id].get('config_snapshot')
+                    cfg_snapshot = order.get('config_snapshot')
                     if cfg_snapshot:
                         async with configs_lock:
                             configs[cfg_snapshot['id']] = cfg_snapshot
                 success += 1
-        if action == 'approve':
-            user_id = orders[order_id]['user_id']
-            cfg = orders[order_id].get('config_snapshot', {})
-            link_md = md_escape(cfg.get('link', ''))
-            oid_md = md_escape(order_id)
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"✅ پرداخت شما تأیید شد!\n🎉 کانفیگ شما:\n`{link_md}`\nID سفارش: `{oid_md}`",
-                parse_mode='MarkdownV2',
-            )
-        else:
-            oid_md = md_escape(order_id)
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=f"❌ پرداخت شما رد شد!\n⚠️ لطفاً به پشتیبانی مراجعه کنید: @manava_vpn\nID سفارش: `{oid_md}`",
-                parse_mode='MarkdownV2',
-            )
+                to_notify.append((order_id, order['user_id'], order.get('config_snapshot', {})))
     await DataManager.save_orders()
     if action == 'reject':
         await DataManager.save_configs()
+    # Send notifications outside lock
+    for oid, uid, cfg in to_notify:
+        if action == 'approve':
+            link_md = md_escape(cfg.get('link', ''))
+            oid_md = md_escape(oid)
+            await context.bot.send_message(
+                chat_id=uid,
+                text=(
+                    f"✅ پرداخت شما تأیید شد!\n🎉 کانفیگ شما:\n`{link_md}`\n\n"
+                    f"ID سفارش: `{oid_md}`\n💡 برای کپی ID، روی آن لمس کنید."
+                ),
+                parse_mode='MarkdownV2',
+            )
+        else:
+            oid_md = md_escape(oid)
+            await context.bot.send_message(
+                chat_id=uid,
+                text=(
+                    "❌ پرداخت شما رد شد!\n⚠️ لطفاً به پشتیبانی مراجعه کنید: @manava_vpn\n\n"
+                    f"ID سفارش: `{oid_md}`\n💡 برای کپی ID، روی آن لمس کنید."
+                ),
+                parse_mode='MarkdownV2',
+            )
     await update.message.reply_text(f"✅ {success} سفارش با موفقیت {action} شدند.")
     return ConversationHandler.END
 
