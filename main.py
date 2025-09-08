@@ -103,7 +103,7 @@ def redact_card(num: Optional[str]) -> str:
         return "**** **** **** " + num[-4:]
     return "****"
 
-def is_rate_limited(user_id: int, window: int = 5) -> bool:
+def is_rate_limited(user_id: int, window: int = 10) -> bool:
     now = time.monotonic()
     last = rate_limiter.get(user_id, 0)
     limited = (now - last) < window
@@ -435,7 +435,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = query.from_user.id
 
-    if is_rate_limited(user_id):
+    # Rate limit فقط برای غیرادمین‌ها
+    if user_id not in ADMINS and is_rate_limited(user_id):
         await query.answer("⏳ لطفاً کمی صبر کنید.")
         return
 
@@ -1056,6 +1057,10 @@ async def webhook_handler(request: web.Request):
         logger.error(f"Webhook error: {e}", exc_info=True)
         return web.Response(status=500)
 
+# Handler for UptimeRobot ping
+async def handle_ping(request: web.Request):
+    return web.Response(text="OK")
+
 async def test_telegram_api():
     async with httpx.AsyncClient(timeout=30.0) as client:
         try:
@@ -1150,6 +1155,7 @@ async def main():
     aiohttp_app = web.Application()
     aiohttp_app['telegram_app'] = application
     aiohttp_app.router.add_post('/', webhook_handler)
+    aiohttp_app.router.add_get('/ping', handle_ping)  # Added for UptimeRobot
 
     async def setup_webhook():
         try:
