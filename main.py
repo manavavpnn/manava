@@ -1079,6 +1079,7 @@ async def main():
             BULK_APPROVE_IDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, bulk_action)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        per_message=True,
     )
 
     application.add_handler(add_conv_handler)
@@ -1100,8 +1101,24 @@ async def main():
     await application.initialize()
     await application.start()
     await application.bot.delete_webhook(drop_pending_updates=True)
+    
+    # غیرفعال کردن موقت JobQueue برای دیباگ
+    # if ADMINS and BACKUP_INTERVAL > 0:
+    #     async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
+    #         try:
+    #             await backup_data(context)
+    #         except Exception as e:
+    #             logger.error(f"Scheduled backup failed: {e}", exc_info=True)
+    #     application.job_queue.run_repeating(scheduled_backup, interval=BACKUP_INTERVAL, first=60)
+    
     logger.info("ربات در حالت Polling شروع به کار کرد.")
-    await application.run_polling()
+    await application.run_polling(close_loop=False)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        logger.info("Using existing event loop")
+        loop.create_task(main())
+    else:
+        logger.info("Starting new event loop")
+        loop.run_until_complete(main())
