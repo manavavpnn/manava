@@ -35,10 +35,10 @@ TOKEN = os.getenv("TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 10000))
 ADMIN_GROUP_ID_STR = os.getenv("ADMIN_GROUP_ID")
-ADMINS_STR = list(map(int, os.getenv("ADMINS", "8122737247,7844158638").split(','))) 
+ADMINS_STR = os.getenv("ADMINS")  # آیدی‌های ادمین از متغیر محیطی
 CARD_NUMBER = os.getenv("CARD_NUMBER")
 CARD_NAME = os.getenv("CARD_NAME")
-WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN")  # optional
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN")  # اختیاری
 
 CONFIG_FILE = "configs.json"
 USERS_FILE = "users.txt"
@@ -319,11 +319,9 @@ async def create_backup_zip(path_list: List[str]) -> str:
         with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
             for p in path_list:
                 if os.path.exists(p):
-                    # arcname to avoid storing absolute paths
                     zf.write(p, arcname=os.path.basename(p))
         return zip_path
     except Exception:
-        # cleanup on failure
         if os.path.exists(zip_path):
             os.remove(zip_path)
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -351,7 +349,6 @@ async def backup_data(context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.error(f"Error sending backup to admin {admin}: {e}", exc_info=True)
     finally:
-        # cleanup temp dir
         tmp_dir = os.path.dirname(zip_path)
         try:
             os.remove(zip_path)
@@ -381,7 +378,6 @@ async def restore_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     """Handle incoming document (ZIP) from admin and restore data."""
     user_id = update.effective_user.id
     if user_id not in ADMINS:
-        # ignore or inform
         return
     if not update.message or not update.message.document:
         await update.message.reply_text("فایل دریافت نشد. لطفاً یک فایل ZIP ارسال کنید.")
@@ -389,7 +385,6 @@ async def restore_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     doc = update.message.document
     fname = doc.file_name or ""
-    # basic validation
     if not fname.lower().endswith(".zip"):
         await update.message.reply_text("لطفاً فقط فایل ZIP ارسال کنید.")
         return
@@ -401,17 +396,14 @@ async def restore_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
         zip_path = os.path.join(tmp_dir, fname)
         await file.download_to_drive(zip_path)
 
-        # extract safely to temp dir
         extract_dir = os.path.join(tmp_dir, "extracted")
         os.makedirs(extract_dir, exist_ok=True)
         with zipfile.ZipFile(zip_path, 'r') as zf:
-            # security: do not allow path traversal in zip entries
             for member in zf.namelist():
                 if os.path.isabs(member) or ".." in member:
                     continue
             zf.extractall(extract_dir)
 
-        # move extracted files to working dir (overwrite)
         restored_files = []
         for base_name in [CONFIG_FILE, ORDERS_FILE, USERS_FILE, BLACKLIST_FILE]:
             src = os.path.join(extract_dir, base_name)
@@ -420,7 +412,6 @@ async def restore_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
                 shutil.copyfile(src, dst)
                 restored_files.append(base_name)
 
-        # reload in-memory structures
         await DataManager.load_configs()
         await DataManager.load_orders()
         await DataManager.load_blacklist()
@@ -475,20 +466,15 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = []
         for key, cfgs in grouped.items():
             if cfgs:
-                # show group with count, open a submenu that lists actual configs
                 keyboard.append([InlineKeyboardButton(f"{key} (موجود: {len(cfgs)})", callback_data=f"buy_group_{md_escape(key)}")])
         keyboard.append([InlineKeyboardButton("لغو", callback_data="cancel")])
         await query.edit_message_text("لطفاً یک گروه کانفیگ انتخاب کنید:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data.startswith("buy_group_"):
-        # decode key: callback data contains escaped key
         key = data[len("buy_group_"):]
-        # find group
         grouped = DataManager.group_configs()
-        # choose configs under this key
         cfgs = grouped.get(key, [])
         if not cfgs:
-            # fallback: try to find matching by prefix (some callback encoding issues)
             matched = []
             for k, v in grouped.items():
                 if k.startswith(key) or key.startswith(md_escape(k)):
@@ -634,7 +620,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             await query.edit_message_text("خطا در انتخاب کانفیگ.")
             return
-        # Reserve config atomically
         async with configs_lock, orders_lock:
             cfg = configs.pop(config_id, None)
             if not cfg:
@@ -647,12 +632,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 'config_id': config_id,
                 'status': 'pending',
                 'timestamp': datetime.now().isoformat(),
-                'config_snapshot': cfg,  # snapshot stored
+                'config_snapshot': cfg,
             }
             await DataManager.save_orders()
             await DataManager.save_configs()
 
-        # send payment instructions
         price_md = md_escape(str(cfg['price']))
         cn_md = md_escape(CARD_NUMBER) if CARD_NUMBER else md_escape(redact_card(CARD_NUMBER))
         nm_safe = md_escape(CARD_NAME or "")
@@ -662,7 +646,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"`{cn_md}`\nنام: {nm_safe}\nID سفارش: `{oid_md}`\n"
             "لطفاً عکس رسید پرداخت خود را همینجا ارسال کنید.\n\n💡 برای کپی ID سفارش، روی آن لمس کنید و کپی کنید."
         )
-        # use MarkdownV2 but all dynamic parts escaped
         await query.edit_message_text(text=text, parse_mode='MarkdownV2')
         context.user_data['pending_order_id'] = order_id
 
@@ -679,7 +662,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 'pending_order_id' in context.user_data:
             del context.user_data['pending_order_id']
 
-# Helper for approve/reject (used in multiple places)
 async def process_order_action(query, context, order_id: str, action: str):
     async with orders_lock:
         if order_id not in orders:
@@ -689,7 +671,6 @@ async def process_order_action(query, context, order_id: str, action: str):
         if order['status'] != 'pending':
             await query.answer("این سفارش قبلاً پردازش شده است!")
             return
-        # operate on snapshot to avoid missing config
         config_snapshot = order.get('config_snapshot')
         if action == "approve" and not config_snapshot:
             await query.answer("کانفیگ یافت نشد!")
@@ -720,7 +701,6 @@ async def process_order_action(query, context, order_id: str, action: str):
                     parse_mode='MarkdownV2',
                 )
                 orders[order_id]['status'] = 'rejected'
-                # if rejected, consider returning config back to pool
                 cfg_snapshot = order.get('config_snapshot')
                 if cfg_snapshot:
                     async with configs_lock:
@@ -730,10 +710,8 @@ async def process_order_action(query, context, order_id: str, action: str):
 
             await DataManager.save_orders()
 
-            # edit admin messages and group message to remove keyboard
             oid_md2 = md_escape(order_id)
             display_text = f"{status_text}:\n👤 کاربر: {order['user_id']}\n📋 ID سفارش: `{oid_md2}`\n"
-            # update admin messages
             admin_msgs = order.get('admin_messages', {})
             for admin_id, msg_id in admin_msgs.items():
                 with contextlib.suppress(Exception):
@@ -744,7 +722,6 @@ async def process_order_action(query, context, order_id: str, action: str):
                         reply_markup=None,
                         parse_mode='MarkdownV2'
                     )
-            # update group message
             gid = order.get('group_chat_id')
             mid = order.get('group_message_id')
             if gid and mid:
@@ -757,7 +734,6 @@ async def process_order_action(query, context, order_id: str, action: str):
                         parse_mode='MarkdownV2'
                     )
 
-            # answer query (edit original admin's message)
             with contextlib.suppress(Exception):
                 await query.edit_message_text(
                     text=display_text,
@@ -769,9 +745,7 @@ async def process_order_action(query, context, order_id: str, action: str):
             logger.error(f"Error in {action}: {e}", exc_info=True)
             await query.answer("خطا در پردازش!")
 
-# Pagination for list_orders
 async def show_orders_page(target, context, page: int):
-    # Use plain text (no MarkdownV2) to avoid complex escaping
     async with orders_lock:
         pending = [(oid, o) for oid, o in orders.items() if o.get('status') == 'pending']
     pending_orders = sorted(pending, key=lambda x: x[1].get('timestamp', ''), reverse=True)
@@ -806,7 +780,6 @@ async def show_orders_page(target, context, page: int):
             InlineKeyboardButton("❌ رد", callback_data=f"order_reject_{oid}"),
         ])
 
-    # Pagination buttons
     pag_buttons = []
     if page > 1:
         pag_buttons.append(InlineKeyboardButton("◀️ قبلی", callback_data=f"orders_page_{page-1}"))
@@ -818,9 +791,8 @@ async def show_orders_page(target, context, page: int):
 
     reply_markup = InlineKeyboardMarkup(keyboard_rows)
 
-    # target can be callback_query or Update
     if hasattr(target, "edit_message_text"):
-        await target.edit_message_text(text, reply_markup=reply_markup)  # plain text to avoid MD issues
+        await target.edit_message_text(text, reply_markup=reply_markup)
     else:
         await target.message.reply_text(text, reply_markup=reply_markup)
 
@@ -830,7 +802,7 @@ async def show_orders_page(target, context, page: int):
 async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id in ADMINS:
-        return  # Ignore for admins
+        return
     if is_rate_limited(user_id):
         await update.message.reply_text("⏳ لطفاً کمی صبر کنید.")
         return
@@ -898,7 +870,6 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         orders[order_id]['admin_messages'] = admin_messages
         await DataManager.save_orders()
 
-    # Send to group as well
     try:
         group_message = await context.bot.send_photo(
             chat_id=ADMIN_GROUP_ID,
@@ -914,10 +885,6 @@ async def handle_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error sending to group: {e}")
 
-# Admin Handlers (add_config, etc.) remain the same as shown earlier.
-# ... (the rest of admin handlers and bulk actions are unchanged and are already included above) ...
-
-# Command for list_orders
 async def list_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in ADMINS:
@@ -932,7 +899,6 @@ async def stats_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await update.message.reply_text(DataManager.get_stats())
 
-# Export commands
 async def export_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in ADMINS:
@@ -954,11 +920,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     context.user_data.clear()
     return ConversationHandler.END
 
-# Ping route
 async def handle_ping(request):
     return web.Response(text="OK")
 
-# Error handler
 async def error_handler(update: Optional[Update], context: ContextTypes.DEFAULT_TYPE):
     logger.error(f"Error: {context.error}", exc_info=True)
     try:
@@ -969,13 +933,125 @@ async def error_handler(update: Optional[Update], context: ContextTypes.DEFAULT_
     except Exception:
         pass
 
-# ===== Main =====
+async def add_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    if user_id not in ADMINS:
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return ConversationHandler.END
+    await update.message.reply_text("حجم کانفیگ (مثل 10GB) را وارد کنید:")
+    return ADD_CONFIG_VOLUME
+
+async def add_config_volume(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['new_config'] = {'volume': update.message.text}
+    await update.message.reply_text("مدت زمان (مثل 30 روز) را وارد کنید:")
+    return ADD_CONFIG_DURATION
+
+async def add_config_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data['new_config']['duration'] = update.message.text
+    await update.message.reply_text("قیمت (به تومان) را وارد کنید:")
+    return ADD_CONFIG_PRICE
+
+async def add_config_price(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        price = int(update.message.text)
+        context.user_data['new_config']['price'] = price
+        await update.message.reply_text("لینک کانفیگ را وارد کنید:")
+        return ADD_CONFIG_LINK
+    except ValueError:
+        await update.message.reply_text("لطفاً یک عدد معتبر برای قیمت وارد کنید:")
+        return ADD_CONFIG_PRICE
+
+async def add_config_link(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    global config_id_counter
+    async with configs_lock:
+        config = context.user_data.pop('new_config')
+        config['id'] = config_id_counter
+        config['link'] = update.message.text
+        configs[config['id']] = config
+        config_id_counter += 1
+        await DataManager.save_configs()
+    await update.message.reply_text("✅ کانفیگ اضافه شد.")
+    return ConversationHandler.END
+
+async def remove_config(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    if user_id not in ADMINS:
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return ConversationHandler.END
+    await update.message.reply_text("ID کانفیگ برای حذف را وارد کنید:")
+    return REMOVE_CONFIG_ID
+
+async def remove_config_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    try:
+        config_id = int(update.message.text)
+        async with configs_lock:
+            if config_id in configs:
+                del configs[config_id]
+                await DataManager.save_configs()
+                await update.message.reply_text("✅ کانفیگ حذف شد.")
+            else:
+                await update.message.reply_text("کانفیگ یافت نشد.")
+    except ValueError:
+        await update.message.reply_text("لطفاً یک ID معتبر وارد کنید:")
+        return REMOVE_CONFIG_ID
+    return ConversationHandler.END
+
+async def bulk_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user_id = update.effective_user.id
+    if user_id not in ADMINS:
+        await update.message.reply_text("❌ دسترسی ندارید.")
+        return ConversationHandler.END
+    action = context.user_data.get('bulk_action')
+    if not action:
+        await update.message.reply_text("خطا: اکشن نامعتبر.")
+        return ConversationHandler.END
+    order_ids = [oid.strip() for oid in update.message.text.split(',') if oid.strip()]
+    if not order_ids:
+        await update.message.reply_text("هیچ ID سفارشی وارد نشده است.")
+        return ConversationHandler.END
+    success = 0
+    for order_id in order_ids:
+        async with orders_lock:
+            if order_id in orders and orders[order_id]['status'] == 'pending':
+                orders[order_id]['status'] = action
+                if action == 'reject':
+                    cfg_snapshot = orders[order_id].get('config_snapshot')
+                    if cfg_snapshot:
+                        async with configs_lock:
+                            configs[cfg_snapshot['id']] = cfg_snapshot
+                success += 1
+        if action == 'approve':
+            user_id = orders[order_id]['user_id']
+            cfg = orders[order_id].get('config_snapshot', {})
+            link_md = md_escape(cfg.get('link', ''))
+            oid_md = md_escape(order_id)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"✅ پرداخت شما تأیید شد!\n🎉 کانفیگ شما:\n`{link_md}`\nID سفارش: `{oid_md}`",
+                parse_mode='MarkdownV2',
+            )
+        else:
+            oid_md = md_escape(order_id)
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"❌ پرداخت شما رد شد!\n⚠️ لطفاً به پشتیبانی مراجعه کنید: @manava_vpn\nID سفارش: `{oid_md}`",
+                parse_mode='MarkdownV2',
+            )
+    await DataManager.save_orders()
+    if action == 'reject':
+        await DataManager.save_configs()
+    await update.message.reply_text(f"✅ {success} سفارش با موفقیت {action} شدند.")
+    return ConversationHandler.END
+
 async def main():
     global ADMINS, ADMIN_GROUP_ID
     try:
         await DataManager.check_env()
         ADMIN_GROUP_ID = int(ADMIN_GROUP_ID_STR)
-        ADMINS = [int(x.strip()) for x in (ADMINS_STR or "").split(',') if x.strip().isdigit()]
+        ADMINS = [int(x.strip()) for x in (ADMINS_STR.split(',') if ADMINS_STR else []) if x.strip().isdigit()]
+        if not ADMINS:
+            logger.error("No valid admin IDs provided in ADMINS env variable")
+            raise ValueError("ADMINS is empty or invalid")
     except (ValueError, AttributeError) as e:
         logger.error(f"Env error: {e}")
         return
@@ -987,7 +1063,6 @@ async def main():
 
     application = Application.builder().token(TOKEN).persistence(PicklePersistence(filepath=PERSISTENCE_FILE)).build()
 
-    # Conversation Handlers
     add_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("add_config", add_config)],
         states={
@@ -1027,39 +1102,31 @@ async def main():
     application.add_handler(MessageHandler(filters.PHOTO & ~filters.COMMAND, handle_receipt))
     application.add_error_handler(error_handler)
 
-    # Backup & Restore handlers
     application.add_handler(CommandHandler("backup", backup_command))
     application.add_handler(CommandHandler("restore", restore_help_command))
-    # Only allow document restores from ADMINS - use filters.User with the ADMINS list
     if ADMINS:
         application.add_handler(MessageHandler(filters.Document.ALL & filters.User(user_id=ADMINS), restore_file_handler))
 
     await application.initialize()
     await application.start()
-    # remove previous webhook and set new one with optional secret token
     await application.bot.delete_webhook(drop_pending_updates=True)
     if WEBHOOK_SECRET_TOKEN:
         await application.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}", secret_token=WEBHOOK_SECRET_TOKEN)
     else:
         await application.bot.set_webhook(f"{WEBHOOK_URL}/{TOKEN}")
 
-    # schedule periodic backup job (if ADMINS defined)
     if ADMINS and BACKUP_INTERVAL > 0:
-        # job callback receives context (context.job)
         async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
             try:
                 await backup_data(context)
             except Exception as e:
                 logger.error(f"Scheduled backup failed: {e}", exc_info=True)
-        # run first backup after 60 seconds, then every BACKUP_INTERVAL seconds
         application.job_queue.run_repeating(scheduled_backup, interval=BACKUP_INTERVAL, first=60)
 
     app = web.Application()
 
     async def webhook_handler(request):
-        # optional secret token validation
         if WEBHOOK_SECRET_TOKEN:
-            # Telegram sends the header 'X-Telegram-Bot-Api-Secret-Token'
             header = request.headers.get('X-Telegram-Bot-Api-Secret-Token', '')
             if header != WEBHOOK_SECRET_TOKEN:
                 logger.warning("Invalid secret token in webhook request")
@@ -1083,7 +1150,6 @@ async def main():
 
     logger.info(f"ربات شروع به کار کرد. پورت: {PORT}")
 
-    # Graceful shutdown
     try:
         await asyncio.Future()
     except KeyboardInterrupt:
