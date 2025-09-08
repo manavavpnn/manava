@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # تنظیمات
 TOKEN = os.getenv("TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-PORT = int(os.getenv("PORT", 8080)) 
+PORT = int(os.getenv("PORT", 10000)) 
 ADMIN_GROUP_ID_STR = os.getenv("ADMIN_GROUP_ID")
 ADMINS_STR = os.getenv("ADMINS")
 CARD_NUMBER = os.getenv("CARD_NUMBER")
@@ -1044,6 +1044,7 @@ async def webhook_handler(request: web.Request):
         if update:
             logger.info(f"Processing update: {update.update_id}")
             await app.process_update(update)
+            logger.info(f"Update {update.update_id} processed successfully")
         else:
             logger.warning("No valid update object created from webhook data")
         return web.Response(status=200)
