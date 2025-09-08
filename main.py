@@ -1098,31 +1098,37 @@ async def main():
         application.add_handler(MessageHandler(filters.Document.ALL & filters.User(user_id=ADMINS), restore_file_handler))
     application.add_error_handler(error_handler)
 
-    await application.initialize()
-    await application.start()
-    await application.bot.delete_webhook(drop_pending_updates=True)
-    
-    # غیرفعال کردن موقت JobQueue برای دیباگ
-    # if ADMINS and BACKUP_INTERVAL > 0:
-    #     async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
-    #         try:
-    #             await backup_data(context)
-    #         except Exception as e:
-    #             logger.error(f"Scheduled backup failed: {e}", exc_info=True)
-    #     application.job_queue.run_repeating(scheduled_backup, interval=BACKUP_INTERVAL, first=60)
-    
-    logger.info("ربات در حالت Polling شروع به کار کرد.")
     try:
-        await application.run_polling(close_loop=False)
+        await application.initialize()
+        await application.start()
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("ربات در حالت Polling شروع به کار کرد.")
+        await application.run_polling(
+            drop_pending_updates=True,
+            close_loop=False,
+            stop_signals=()
+        )
+    except Exception as e:
+        logger.error(f"Error running application: {e}", exc_info=True)
     finally:
-        await application.stop()
-        await application.updater.stop()
+        try:
+            if application.updater.running:
+                await application.updater.stop()
+            await application.stop()
+        except Exception as e:
+            logger.error(f"Error stopping application: {e}", exc_info=True)
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(main())
+    except Exception as e:
+        logger.error(f"Error in main loop: {e}", exc_info=True)
     finally:
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.close()
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception as e:
+            logger.error(f"Error shutting down asyncgens: {e}", exc_info=True)
+        finally:
+            loop.close()
