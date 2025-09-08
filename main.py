@@ -28,12 +28,12 @@ import contextlib
 import zipfile
 import tempfile
 import shutil
-import httpx
+from aiohttp import web
 
 # تنظیمات لاگ‌گیری
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.DEBUG  # برای دیباگ بیشتر
+    level=logging.DEBUG
 )
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ ADMIN_GROUP_ID_STR = os.getenv("ADMIN_GROUP_ID")
 ADMINS_STR = os.getenv("ADMINS")
 CARD_NUMBER = os.getenv("CARD_NUMBER")
 CARD_NAME = os.getenv("CARD_NAME")
-WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN")
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN", "your-secret-token")
 
 CONFIG_FILE = "configs.json"
 USERS_FILE = "users.txt"
@@ -341,7 +341,7 @@ async def backup_data(context: ContextTypes.DEFAULT_TYPE):
                         caption="📦 بکاپ داده‌ها — نگهدارید تا در زمان دیپلوی بعدی استفاده کنید."
                     )
             except Exception as e:
-                logger.error(f"Error sending backup to admin {admin}: {e}", exc_info=True)
+                logger.error(f"Error sending backup to admin {admin}: {e}")
     finally:
         tmp_dir = os.path.dirname(zip_path)
         try:
@@ -393,7 +393,7 @@ async def restore_file_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             for member in zf.namelist():
                 if os.path.isabs(member) or ".." in member:
                     continue
-            zf.extractall(extract_dir)
+                zf.extract(member, extract_dir)
 
         restored_files = []
         for base_name in [CONFIG_FILE, ORDERS_FILE, USERS_FILE, BLACKLIST_FILE]:
@@ -425,7 +425,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await DataManager.save_user(user_id)
     keyboard = [
         [InlineKeyboardButton("💳 خرید کانفیگ", callback_data="buy")],
-        [InlineKeyboardButton("📞تماس با پشتیبانی", callback_data="support")],
+        [InlineKeyboardButton("📞 تماس با پشتیبانی", callback_data="support")],
     ]
     if user_id in ADMINS:
         keyboard.append([InlineKeyboardButton("🔧 پنل ادمین", callback_data="admin_panel")])
@@ -451,7 +451,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "buy":
         if not configs:
-            await query.edit_message_text("موجودی سرور ها تمام شده، جهت ثبت سفارش به پشتیبانی مراجعه کنید.")
+            await query.edit_message_text("موجودی سرورها تمام شده، جهت ثبت سفارش به پشتیبانی مراجعه کنید.")
             return
         grouped = DataManager.group_configs()
         keyboard = []
@@ -1031,6 +1031,23 @@ async def error_handler(update: Optional[Update], context: ContextTypes.DEFAULT_
     except Exception:
         pass
 
+# Webhook handler for aiohttp
+async def webhook_handler(request: web.Request):
+    app = request.app['telegram_app']
+    try:
+        secret_token = request.headers.get('X-Telegram-Bot-Api-Secret-Token')
+        if secret_token != WEBHOOK_SECRET_TOKEN:
+            logger.warning("Invalid webhook secret token")
+            return web.Response(status=403)
+        data = await request.json()
+        update = Update.de_json(data, app.bot)
+        if update:
+            await app.process_update(update)
+        return web.Response(status=200)
+    except Exception as e:
+        logger.error(f"Webhook error: {e}", exc_info=True)
+        return web.Response(status=500)
+
 async def main():
     global ADMINS, ADMIN_GROUP_ID
     try:
@@ -1049,13 +1066,7 @@ async def main():
     await DataManager.load_blacklist()
     await DataManager.load_configs()
 
-    # تنظیم کلاینت httpx با retry
-    http_client = httpx.AsyncClient(
-        timeout=10.0,
-        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)
-    )
-
-    application = Application.builder().token(TOKEN).persistence(PicklePersistence(filepath=PERSISTENCE_FILE)).http_client(http_client).build()
+    application = Application.builder().token(TOKEN).persistence(PicklePersistence(filepath=PERSISTENCE_FILE)).build()
 
     add_conv_handler = ConversationHandler(
         entry_points=[CommandHandler("add_config", add_config)],
@@ -1101,51 +1112,73 @@ async def main():
         application.add_handler(MessageHandler(filters.Document.ALL & filters.User(user_id=ADMINS), restore_file_handler))
     application.add_error_handler(error_handler)
 
-    async def run_application():
+    # تنظیم JobQueue برای بکاپ
+    if ADMINS and BACKUP_INTERVAL > 0:
+        async def scheduled_backup(context: ContextTypes.DEFAULT_TYPE):
+            try:
+                await backup_data(context)
+            except Exception as e:
+                logger.error(f"Scheduled backup failed: {e}", exc_info=True)
+        application.job_queue.run_repeating(scheduled_backup, interval=BACKUP_INTERVAL, first=60)
+
+    # راه‌اندازی سرور Webhook
+    aiohttp_app = web.Application()
+    aiohttp_app['telegram_app'] = application
+    aiohttp_app.router.add_post('/', webhook_handler)
+
+    async def setup_webhook():
+        try:
+            await application.bot.set_webhook(
+                url=WEBHOOK_URL,
+                secret_token=WEBHOOK_SECRET_TOKEN,
+                allowed_updates=["message", "callback_query"]
+            )
+            logger.info(f"Webhook set to {WEBHOOK_URL}")
+        except Exception as e:
+            logger.error(f"Failed to set webhook: {e}", exc_info=True)
+            raise
+
+    async def start_application():
         try:
             await application.initialize()
             await application.start()
-            await application.bot.delete_webhook(drop_pending_updates=True)
-            logger.info("ربات در حالت Polling شروع به کار کرد.")
-            await application.run_polling(
-                drop_pending_updates=True,
-                close_loop=False,
-                stop_signals=(),
-                allowed_updates=["message", "callback_query"]
-            )
+            await setup_webhook()
+            logger.info("Application started with Webhook")
         except Exception as e:
-            logger.error(f"Error running application: {e}", exc_info=True)
-        finally:
-            try:
-                if application.updater and application.updater.running:
-                    await application.updater.stop()
-                await application.stop()
-                await http_client.aclose()
-            except Exception as e:
-                logger.error(f"Error stopping application: {e}", exc_info=True)
+            logger.error(f"Error starting application: {e}", exc_info=True)
+            raise
+
+    async def stop_application():
+        try:
+            if application.updater and application.updater.running:
+                await application.updater.stop()
+            await application.stop()
+            await application.bot.delete_webhook(drop_pending_updates=True)
+            logger.info("Application stopped")
+        except Exception as e:
+            logger.error(f"Error stopping application: {e}", exc_info=True)
 
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            logger.debug("Using existing event loop")
-            await run_application()
-        else:
-            logger.debug("Creating new event loop")
-            loop.run_until_complete(run_application())
-    except RuntimeError as e:
-        if "no running event loop" in str(e):
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(run_application())
-        else:
-            logger.error(f"Error in event loop management: {e}", exc_info=True)
-            raise
+        # راه‌اندازی سرور aiohttp
+        runner = web.AppRunner(aiohttp_app)
+        await runner.setup()
+        site = web.TCPSite(runner, '0.0.0.0', PORT)
+        await start_application()
+        await site.start()
+        logger.info(f"Webhook server running on port {PORT}")
+
+        # نگه داشتن برنامه در حال اجرا
+        while True:
+            await asyncio.sleep(3600)
+    except Exception as e:
+        logger.error(f"Error in main loop: {e}", exc_info=True)
+        raise
     finally:
-        try:
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            loop.close()
-        except Exception as e:
-            logger.error(f"Error shutting down loop: {e}", exc_info=True)
+        await stop_application()
+        await runner.cleanup()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except Exception as e:
+        logger.error(f"Main error: {e}", exc_info=True)
