@@ -35,10 +35,10 @@ TOKEN = os.getenv("TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT = int(os.getenv("PORT", 10000))
 ADMIN_GROUP_ID_STR = os.getenv("ADMIN_GROUP_ID")
-ADMINS_STR = os.getenv("ADMINS")  # آیدی‌های ادمین از متغیر محیطی
+ADMINS_STR = os.getenv("ADMINS")
 CARD_NUMBER = os.getenv("CARD_NUMBER")
 CARD_NAME = os.getenv("CARD_NAME")
-WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN")  # اختیاری
+WEBHOOK_SECRET_TOKEN = os.getenv("WEBHOOK_SECRET_TOKEN")
 
 CONFIG_FILE = "configs.json"
 USERS_FILE = "users.txt"
@@ -51,7 +51,7 @@ users_cache: Set[int] = set()
 orders: Dict[str, Dict] = {}
 configs: Dict[int, Dict] = {}
 blacklist: Set[int] = set()
-config_id_counter = 1  # Simple int counter, reset on load
+config_id_counter = 1
 
 # Locks for concurrency
 orders_lock = asyncio.Lock()
@@ -59,11 +59,11 @@ configs_lock = asyncio.Lock()
 users_lock = asyncio.Lock()
 blacklist_lock = asyncio.Lock()
 
-# Simple rate limiter: user_id -> last_action_time
+# Simple rate limiter
 rate_limiter: Dict[int, float] = {}
 
 # Pagination settings
-ORDERS_PER_PAGE = 5  # For pagination in list_orders
+ORDERS_PER_PAGE = 5
 
 # Backup schedule (seconds). Default: 24h
 BACKUP_INTERVAL = int(os.getenv("BACKUP_INTERVAL_SECONDS", 24 * 3600))
@@ -78,7 +78,7 @@ logger = logging.getLogger(__name__)
 # ===== Conversation States =====
 ADD_CONFIG_VOLUME, ADD_CONFIG_DURATION, ADD_CONFIG_PRICE, ADD_CONFIG_LINK = range(4)
 REMOVE_CONFIG_ID = 0
-BULK_APPROVE_IDS = 1  # For bulk actions
+BULK_APPROVE_IDS = 1
 
 # ===== Utilities =====
 def md_escape(s: str) -> str:
@@ -111,7 +111,7 @@ def is_rate_limited(user_id: int, window: int = 5) -> bool:
     limited = (now - last) < window
     rate_limiter[user_id] = now
     if len(rate_limiter) > 10000:
-        cutoff = now - 300  # 5 minutes
+        cutoff = now - 300
         for k, v in list(rate_limiter.items()):
             if v < cutoff:
                 rate_limiter.pop(k, None)
@@ -1079,7 +1079,7 @@ async def main():
             BULK_APPROVE_IDS: [MessageHandler(filters.TEXT & ~filters.COMMAND, bulk_action)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
-        per_message=True,
+        per_message=False,
     )
 
     application.add_handler(add_conv_handler)
@@ -1112,13 +1112,17 @@ async def main():
     #     application.job_queue.run_repeating(scheduled_backup, interval=BACKUP_INTERVAL, first=60)
     
     logger.info("ربات در حالت Polling شروع به کار کرد.")
-    await application.run_polling(close_loop=False)
+    try:
+        await application.run_polling(close_loop=False)
+    finally:
+        await application.stop()
+        await application.updater.stop()
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        logger.info("Using existing event loop")
-        loop.create_task(main())
-    else:
-        logger.info("Starting new event loop")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
         loop.run_until_complete(main())
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        loop.close()
